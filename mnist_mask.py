@@ -45,6 +45,52 @@ JSON_FILENAME_KEY = "filepath"
 JSON_MASK_RESOLUTION = (14, 14) # compare letter resolution
 DATA_IMAGEROOT = "data/mask_rcnn/images"
 
+
+
+def otherroot(imagefileroot, new_mnist_root, image_mnist_root=MNIST_PNG_FOLDER):
+    """Returns (and creates) path with exchanged root folder for given image file."""
+    newimagefileroot = imagefileroot.replace(image_mnist_root, new_mnist_root, 1)
+    if not os.path.isdir(newimagefileroot):
+        os.makedirs(newimagefileroot)
+    return newimagefileroot
+
+
+def write_image(imagefile, image):
+    cv2.imwrite(imagefile, image)
+
+
+def load_image(imagefile):
+    return cv2.imread(imagefile)
+
+
+def resized_image_from_file(root, imagefilename,
+                            avg_height=None, max_height_variance=None,
+                            fixed_scaling_factor=None):
+    """Get image from file and resize by fixed_scaling_factor or randomly.
+
+    Parameters:
+        root: root of imagefile
+        imagefilename: filename
+        fixed_scaling_factor: rescale image by this factor;
+            either this or avg_height, max_size_variance have to be set
+        avg_height, max_height_variance: if fixed_scaling_factor is not set,
+            the image is rescaled to have a height within
+            [avg_height-max_height_variance, avg_height+max_height_variance]
+    """
+    # obtain cv2 images
+    imagefile = os.path.join(root, imagefilename)
+    image = load_image(imagefile)
+
+    # resize
+    if fixed_scaling_factor is None:
+        h = image.shape[0]  # current letter height
+        dh = (random.random() * 2 - 1) * max_height_variance * avg_height  # random difference from avg_height
+        fixed_scaling_factor = (avg_height + dh) / h
+    image = cv2.resize(image, None, fx=fixed_scaling_factor, fy=fixed_scaling_factor)
+
+    return image, fixed_scaling_factor
+
+
 # TODO: RoI-Align
 def simple_resize(image, dimension):
     return cv2.resize(image, dimension)
@@ -99,8 +145,26 @@ def max_bounding_box(mask,
     return (boxes_xmin, boxes_ymin), (boxes_xmax, boxes_ymax)
 
 
+def do_boxes_intersect(box, *other_boxes):
+    """Whether the first box intersects with any of the others.
+
+    :param tuple box: box described by coordinates of upper left corner
+        and width, height by ((x,y),(w,h)) with x, y, w, h integers
+    :param list other_boxes: list of other boxes of the form ((x,y), (width,height))
+    :return: bool
+    """
+    ((x, y), (w, h)) = box
+    for ((other_x, other_y), (other_w, other_h)) in other_boxes:
+        # pt lies in box?
+        if ((other_x <= x <= other_x + other_w) or (x <= other_x <= x+w)) and \
+           ((other_y <= y <= other_y + other_h) or (y <= other_y <= y+h)):
+            return True
+    return False
+
+
 def crop_and_mask(image, inverted=True, debug=False):
     """Crop image to largest bounding box; for debugging only mark bounding boxes.
+    
    :param str image: cv2 image to get a cropped version from
    :param bool inverted: whether the image is already inverted
       (MNIST: yes, i.e. letters white, background black)
@@ -124,13 +188,13 @@ def crop_and_mask(image, inverted=True, debug=False):
     return image, mask
 
 
-def write_crop_and_mask(imagefile, maskoutfile, cropoutfile):
+def generate_crop_and_mask_files(imagefile, maskoutfile, cropoutfile):
     # load image (MNIST: letters white, background black)
-    image = cv2.imread(imagefile)
+    image = load_image(imagefile)
     crop, mask = crop_and_mask(image, debug=False)
     # output
-    cv2.imwrite(maskoutfile, mask)
-    cv2.imwrite(cropoutfile, crop)
+    write_image(maskoutfile, mask)
+    write_image(cropoutfile, crop)
 
 
 def crop_and_mask_mnist(mnist_src_root=MNIST_PNG_FOLDER,
@@ -151,19 +215,48 @@ def crop_and_mask_mnist(mnist_src_root=MNIST_PNG_FOLDER,
             maskfile = os.path.join(maskroot, filename)
             cropfile = os.path.join(croproot, filename)
             imagefile = os.path.join(root, filename)
-            write_crop_and_mask(
+            generate_crop_and_mask_files(
                 imagefile=imagefile,
                 maskoutfile=maskfile,
                 cropoutfile=cropfile
             )
 
 
-def otherroot(imagefileroot, new_mnist_root, image_mnist_root=MNIST_PNG_FOLDER):
-    """Returns (and creates) path with exchanged root folder for given image file."""
-    newimagefileroot = imagefileroot.replace(image_mnist_root, new_mnist_root, 1)
-    if not os.path.isdir(newimagefileroot):
-        os.makedirs(newimagefileroot)
-    return newimagefileroot
+def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLUTION, resizefunc=simple_resize):
+    """Produce lists of (imgs, labels, masks), all images as np.array, from folder hierarchy.
+
+    Needs a folder hierarchy of
+    |-folderroot
+        |-foldername
+            |-folders with labels as name (e.g. 1, 2, 3 ...)
+               |-images with that label
+
+    :param str foldername: folder name where the images lie within under the label-folders
+    :param str folderroot: path to the folder
+    :param tuple imagedim: dimension of the output images
+    :param func resizefunc: function for resizing of the form (image, imagedim) -> resized_image
+    """
+    labeled_data = []
+    folderpath = os.path.join(folderroot, foldername)
+    for path, dirs, files in os.walk(folderpath):
+        label = os.path.basename(path)
+        print("Processing label", label, "in folder", folderpath)
+        for file in files:
+            # x
+            imagefile = os.path.join(path, file)
+            image = load_image(imagefile)
+            image = resizefunc(image, imagedim)
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # 1 channel
+
+            # mask
+            maskfileroot = otherroot(path, new_mnist_root=MNIST_MASK_ROOT, image_mnist_root=MNIST_CROP_ROOT)
+            maskfile = os.path.join(maskfileroot, file)
+            mask = load_image(maskfile)
+            mask = resizefunc(mask, imagedim)
+
+            labeled_data.append((image, label, mask))
+    x, label, masks = tuple(zip(*labeled_data))
+    return (np.array(x), np.array(label), np.array(masks))
 
 
 def load_data(
@@ -174,15 +267,20 @@ def load_data(
         do_resize=True):
     """Load MNIST training and test data as (cropped img, mask, label).
 
-   Need directory structure
-   root images
-      label folders
-         images
-   root mask
-      label folders
-         images
-   root crop
+   Needsdirectory structure
+
+   |-root images
+   |   |-label folders
+   |      |-images
+   |-root mask
+   |   |-label folders
+   |      |-images
+   |-root crop
       ...
+
+    :param str mnist_crop_root: root folder of cropped images (.jpg or .png)
+    :param str mnist_mask_root: root folder of masks (.jpg or .png)
+    :param str test_folder: folder name of
    """
     print("Loading data ...")
 
@@ -194,40 +292,14 @@ def load_data(
     further_args = {}
     if not do_resize:
         further_args = {"resizefunc": lambda x: x}
-    test = labeled_data_from_folder(test_folder, mnist_crop_root, **further_args)
-    train = labeled_data_from_folder(train_folder, mnist_crop_root, **further_args)
+    test = load_labeled_data_from_folder(test_folder, mnist_crop_root, **further_args)
+    train = load_labeled_data_from_folder(train_folder, mnist_crop_root, **further_args)
     return train, test
 
 
-def labeled_data_from_folder(folder, folderroot, imagedim=LETTER_RESOLUTION, resizefunc=simple_resize):
-    """Produce list of (imgs, labels, masks) from folder hierarchy."""
-    labeled_data = []
-    folderpath = os.path.join(folderroot, folder)
-    for path, dirs, files in os.walk(folderpath):
-        label = os.path.basename(path)
-        print("Processing label", label, "in folder", folderpath)
-        for file in files:
-            # x
-            imagefile = os.path.join(path, file)
-            image = cv2.imread(imagefile)
-            image = resizefunc(image, imagedim)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # 1 channel
-
-            # mask
-            maskfileroot = otherroot(path, new_mnist_root=MNIST_MASK_ROOT, image_mnist_root=MNIST_CROP_ROOT)
-            maskfile = os.path.join(maskfileroot, file)
-            mask = cv2.imread(maskfile)
-            mask = resizefunc(mask, imagedim)
-
-            labeled_data.append((image, label, mask))
-    x, label, masks = tuple(zip(*labeled_data))
-    return (np.array(x), np.array(label), np.array(masks))
-
-
-# -----------------------------
-# Word generation
-# -----------------------------
-
+# ------------
+# RANDOM UTILS
+# ------------
 def random_letter(labelroot=os.path.join(MNIST_CROP_ROOT, "testing")):
     """Randomly pick an image from a random label folder.
 
@@ -256,7 +328,123 @@ def random_file(root):
     )
 
 
-def create_random_image(
+def random_color(max_brightness=MAX_BRIGHTNESS):
+    """Picks a color out of the VALID_COLORS for the specified max_brightness.
+
+    The set of valid colors for very encountered max_brightness value is
+    saved in VALID_COLORS to be reused.
+
+    Parameters:
+        int max_brightness: maximum value of the sum of all channels;
+            has to be in [0, 3*255]
+    """
+    if max_brightness not in VALID_COLORS.keys():
+        VALID_COLORS[max_brightness] = valid_colors(max_brightness)
+    randcolor = random.choice(VALID_COLORS[max_brightness])
+    return randcolor
+
+
+def random_window(image, window_xdim, window_ydim):
+    img_ydim, img_xdim = image.shape[0], image.shape[1]
+    window_aspect_ratio = window_ydim / window_xdim
+
+    # max window dimensions with above aspect ratio
+    window_maxw = min(img_xdim, int(img_ydim / window_aspect_ratio))
+    # random window width, height within above bounds
+    w = random.randint(window_xdim, window_maxw) if window_maxw > window_xdim else window_maxw
+    h = int(window_aspect_ratio * w)
+    # random position of window in texture image
+    x, y = random_anchor(w, h, img_xdim, img_ydim)
+
+    # extract window as image and resize to wanted dimensions
+    window = image[y:y + h, x:x + w]
+    window = cv2.resize(window, (window_xdim, window_ydim))
+    return window
+
+
+def random_coord(xmin, xmax, ymin, ymax):
+    return (random.randint(xmin, xmax), random.randint(ymin, ymax))
+
+
+def random_anchor(w, h, xdimension, ydimension,
+                  occupied_boxes=None,
+                  valid_box_anchors=None):
+    """
+    :param int w: width of the window in px
+    :param int h: height of the window in px
+    :param int xdimension: width of the complete image
+    :param int ydimension: height of the complete image
+    :param list occupied_boxes: list/tuple of boxes of the form ((x,y), (width, height))
+        the window may not intersect with
+    :return: (x,y) valid random coordinate
+    """
+    if occupied_boxes is None:
+        return random.randint(0, xdimension - w), random.randint(0, ydimension - h)
+    valid_box_anchors = valid_box_anchors or \
+                        [(x, y)
+                         for x in range(0, xdimension-w)
+                         for y in range(0, ydimension-h)
+                         if not do_boxes_intersect(((x, y), (w, h)), *occupied_boxes)]
+    return random.choice(valid_box_anchors)
+
+
+def apply_layer_from_random_file(image, layerroot, weight1=0.9, weight2=0.4):
+    """Apply an image from file as layer to the given image.
+
+    :param nd.array image: image data
+    :param str layerroot: path to root folder of layer images
+    :param float weight1: weight of image for blending
+    :param float weight2: weight of layer for blending
+    :return: image data with applied layer
+    """
+    ydim, xdim, channels = image.shape
+    layerfile = random_file(layerroot)
+    layer = invert(load_image(os.path.join(layerroot, layerfile)))
+    image = cv2.addWeighted(image, weight1,
+                            random_window(layer, xdim, ydim), -weight2,
+                            0)
+    return image
+
+
+# ----------------
+# MATCH FORMAT TRANSLATIONS
+# ----------------
+def to_match_dict(label, bounding_box, mask):
+    return {
+        JSON_LABEL_KEY: label,
+        JSON_BOUNDING_BOX_KEY: bounding_box,
+        JSON_MASK_KEY: mask.tolist()
+    }
+
+
+def match_to_tuple(match):
+    """Reformat dict match to tuple.
+    :param dict match: match with keys JSON_LABEL_KEY, JSON_BOUNDING_BOX_KEY, JSON_MASK_KEY
+        and values as specified for these keys
+    :param mask_resolution: resolution the mask is resized to
+    :return: tuple (label, bounding box, mask in mask_resolution)
+    """
+    mask = np.array(match[JSON_MASK_KEY])
+    # TODO: make resize work
+    # if (mask.shape[1], mask.shape[0]) != mask_resolution:
+    #     mask = cv2.resize(mask, mask_resolution)
+
+    # ensure integer coordinates
+    # see https://stackoverflow.com/questions/13225525/system-error-new-style-getargs-format-but-argument-is-not-a-tuple-when-using/43656642#43656642
+    (x1, y1), (x2, y2) = match[JSON_BOUNDING_BOX_KEY]
+    bounding_box = ((int(x1), int(y1)), (int(x2), int(y2)))
+
+    return (
+        match[JSON_LABEL_KEY],
+        bounding_box,
+        mask
+    )
+
+
+# -----------------------------
+# Image generation
+# -----------------------------
+def generate_random_image(
         min_letters=0, max_letters=8,
         min_lettersize=28, max_lettersize=60,
         max_overlap=5,
@@ -288,7 +476,8 @@ def create_random_image(
 
     # TEXTURE
     texturefile = random_file(TEXTURES_FOLDER)
-    texture = cv2.imread(os.path.join(TEXTURES_FOLDER, texturefile))
+    # TODO: Why Error "Premature end of JPEG file"?t
+    texture = load_image(os.path.join(TEXTURES_FOLDER, texturefile))
     # (randomly) extract window for image
     image = random_window(texture, xdimension, ydimension)
 
@@ -303,7 +492,7 @@ def create_random_image(
     if num_letters == 0:
         return image, ()
 
-    letterfiles = list(map(lambda i: random_letter(),
+    letterfiles = list(map(lambda r: random_letter(),
                            range(0, num_letters)))
     # common parameters
     avg_height = random.randint(min_lettersize, max_lettersize)
@@ -341,147 +530,22 @@ def create_random_image(
     # (STAINS)
 
     if debug:
-        # draw bounding boxes
-        for match in matches:
-            cv2.rectangle(image,
-                          match[JSON_BOUNDING_BOX_KEY][0],  # (x, y)
-                          match[JSON_BOUNDING_BOX_KEY][1],  # (w, h)
-                          (0, 255, 0))
+        # draw metadata into image
+        image = draw_masks_and_labels(image,
+                                      map(lambda m: match_to_tuple(m), matches))
 
     return image, matches
 
 
-
-
-def apply_layer_from_random_file(image, layerroot, weight1=0.9, weight2=0.4):
-    """Apply an image from file as layer to the given image.
-
-    :param nd.array image: image data
-    :param str layerroot: path to root folder of layer images
-    :param float weight1: weight of image for blending
-    :param float weight2: weight of layer for blending
-    :return: image data with applied layer
-    """
-    ydim, xdim, channels = image.shape
-    layerfile = random_file(layerroot)
-    layer = invert(cv2.imread(os.path.join(layerroot, layerfile)))
-    image = cv2.addWeighted(image, weight1,
-                            random_window(layer, xdim, ydim), -weight2,
-                            0)
-    return image
-
-
-def random_color(max_brightness=MAX_BRIGHTNESS):
-    """Picks a color out of the VALID_COLORS for the specified max_brightness.
-
-    The set of valid colors for very encountered max_brightness value is
-    saved in VALID_COLORS to be reused.
-
-    Parameters:
-        int max_brightness: maximum value of the sum of all channels;
-            has to be in [0, 3*255]
-    """
-    if max_brightness not in VALID_COLORS.keys():
-        VALID_COLORS[max_brightness] = valid_colors(max_brightness)
-    randcolor = random.choice(VALID_COLORS[max_brightness])
-    return randcolor
-
-
-def resized_image_from_file(root, imagefilename,
-                            avg_height=None, max_height_variance=None,
-                            fixed_scaling_factor=None):
-    """Get image from file and resize by fixed_scaling_factor or randomly.
-
-    Parameters:
-        root: root of imagefile
-        imagefilename: filename
-        fixed_scaling_factor: rescale image by this factor;
-            either this or avg_height, max_size_variance have to be set
-        avg_height, max_height_variance: if fixed_scaling_factor is not set,
-            the image is rescaled to have a height within
-            [avg_height-max_height_variance, avg_height+max_height_variance]
-    """
-    # obtain cv2 images
-    imagefile = os.path.join(root, imagefilename)
-    image = cv2.imread(imagefile)
-
-    # resize
-    if fixed_scaling_factor is None:
-        h = image.shape[0]  # current letter height
-        dh = (random.random() * 2 - 1) * max_height_variance * avg_height  # random difference from avg_height
-        fixed_scaling_factor = (avg_height + dh) / h
-    image = cv2.resize(image, None, fx=fixed_scaling_factor, fy=fixed_scaling_factor)
-
-    return image, fixed_scaling_factor
-
-
-def random_window(image, window_xdim, window_ydim):
-    img_ydim, img_xdim = image.shape[0], image.shape[1]
-    window_aspect_ratio = window_ydim / window_xdim
-
-    # max window dimensions with above aspect ratio
-    window_maxw = min(img_xdim, int(img_ydim / window_aspect_ratio))
-    window_maxh = min(img_ydim, int(img_xdim * window_aspect_ratio))
-    # random window width, height within above bounds
-    w = random.randint(window_xdim, window_maxw) if window_maxw > window_xdim else window_maxw
-    h = int(window_aspect_ratio * w)
-    # random position of window in texture image
-    x, y = random_anchor(w, h, img_xdim, img_ydim)
-
-    # extract window as image and resize to wanted dimensions
-    window = image[y:y + h, x:x + w]
-    window = cv2.resize(window, (window_xdim, window_ydim))
-    return window
-
-
-def random_coord(xmin, xmax, ymin, ymax):
-    return (random.randint(xmin, xmax), random.randint(ymin, ymax))
-
-def random_anchor(w, h, xdimension, ydimension,
-                  occupied_boxes=None,
-                  valid_box_anchors=None):
-    """
-    :param int w: width of the window in px
-    :param int h: height of the window in px
-    :param int xdimension: width of the complete image
-    :param int ydimension: height of the complete image
-    :param list occupied_boxes: list/tuple of boxes of the form ((x,y), (width, height))
-        the window may not intersect with
-    :return: (x,y) valid random coordinate
-    """
-    if occupied_boxes is None:
-        return random.randint(0, xdimension - w), random.randint(0, ydimension - h)
-    valid_box_anchors = valid_box_anchors or \
-                        [(x, y)
-                         for x in range(0, xdimension-w)
-                         for y in range(0, ydimension-h)
-                         if not do_boxes_intersect(((x, y), (w, h)), *occupied_boxes)]
-    return random.choice(valid_box_anchors)
-
-
-def do_boxes_intersect(box, *other_boxes):
-    """Whether the first box intersects with any of the others.
-
-    :param tuple box: box described by coordinates of upper left corner
-        and width, height by ((x,y),(w,h)) with x, y, w, h integers
-    :param list other_boxes: list of other boxes of the form ((x,y), (width,height))
-    :return: bool
-    """
-    ((x, y), (w, h)) = box
-    for ((other_x, other_y), (other_w, other_h)) in other_boxes:
-        # pt lies in box?
-        if ((other_x <= x <= other_x + other_w) or (x <= other_x <= x+w)) and \
-           ((other_y <= y <= other_y + other_h) or (y <= other_y <= y+h)):
-            return True
-    return False
-
-def generate_labeled_data(num_samples=100,
-                          imageroot=DATA_IMAGEROOT,
-                          annotationsroot="data/mask_rcnn/annotations",
-                          annotations_filename="annotations.json",
-                          start_id_enumeration=1,
-                          mask_resolution=JSON_MASK_RESOLUTION
-                          ):
+def generate_labeled_data_files(batch_size=1000,
+                                imageroot=DATA_IMAGEROOT,
+                                annotationsroot="data/mask_rcnn/annotations",
+                                annotations_filename_format="annotations{}.json",
+                                image_filename_format = "{}.jpg",
+                                start_id_enumeration=1,
+                                mask_resolution=JSON_MASK_RESOLUTION,
+                                num_batches=500
+                                ):
     """Generate num_samples images with annotations and save them.
 
     The annotations are saved in a json file of the format
@@ -494,9 +558,12 @@ def generate_labeled_data(num_samples=100,
         }
     ]
 
-    :param int num_samples: number of images to create
+    :param int batch_size: number of images that are created and annotated in one file per batch
+    :param int num_batches: number of batches to perform;
+        each batch produces one annotation file under annotationsroot
     :param str imageroot: path to folder to store images in
-    :param str annotation_folder: path to folder to store annotation file in
+    :param str annotationsroot: path to folder to store annotation files in
+    :param str annotations_filename_format: format string accepting the batch_id for naming the annotation files
     :param int start_id_enumeration: the filenames serve as id, and are
         enumerated sequentially starting at start_id_enumeration
     :param tuple mask_resolution: resolution as (width, height) to which the mask is resized before saving
@@ -508,34 +575,42 @@ def generate_labeled_data(num_samples=100,
     if not os.path.isdir(annotationsroot):
         os.makedirs(annotationsroot)
 
-    annotations = []
-    # create images
-    for img_id in range(start_id_enumeration, num_samples):
-        imagefilename = str(img_id) + ".jpg"
-        imagefile = os.path.join(imageroot, imagefilename)
-        image, matches = create_random_image()
+    for batch_id in range(0, num_batches):
+        annotations = []
+        for img_id in range(start_id_enumeration, start_id_enumeration + batch_size):
+            image, matches = generate_random_image()
+            imagefilename = image_filename_format.format(img_id)
+            imagefile = os.path.join(imageroot, imagefilename)
 
-        # save image
-        print(imagefile)
-        cv2.imwrite(imagefile, image)
-        # note annotation
-        annotations.append({
-            JSON_FILENAME_KEY: imagefilename,
-            JSON_MATCHES_KEY: matches
-        })
+            # save image
+            print(imagefile)
+            write_image(imagefile, image)
+            # note annotation
+            annotations.append({
+                JSON_FILENAME_KEY: imagefilename,
+                JSON_MATCHES_KEY: matches
+            })
 
-    # save all annotations
-    annotationsfile = os.path.join(annotationsroot, annotations_filename)
-    with open(annotationsfile, 'w+') as annotations_filehandle:
-        json.dump(annotations, annotations_filehandle)
+        # save all annotations
+        annotations_filename = annotations_filename_format.format(batch_id)
+        annotationsfile = os.path.join(annotationsroot, annotations_filename)
+        with open(annotationsfile, 'w+') as annotations_filehandle:
+            print("Writing ", annotationsfile, "...")
+            json.dump(annotations, annotations_filehandle)
+
+        start_id_enumeration += batch_size
 
 
-def load_labeled_data(annotationsfile="data/mask_rcnn/annotations/annotations.json",
+# -----------
+# LOAD TOOLS
+# -----------
+
+def load_labeled_data(annotationsroot="data/mask_rcnn/annotations",
                       imageroot=DATA_IMAGEROOT,
                       mask_resolution=JSON_MASK_RESOLUTION):
-    """Read in images and annotations as specified in annotationsfile.
+    """Read in images and annotations as specified in annotationsfiles found in annotationsroot.
 
-    :param str annotationsfile: path to json file with annotations
+    :param str annotationsroot: path to root folder of json files with annotations
         of the format specified in generate_labeled_data()
     :param tuple mask_resolution: resolution as (width, height) to which the mask is resized
     :return: tuple of lists of the format
@@ -544,57 +619,94 @@ def load_labeled_data(annotationsfile="data/mask_rcnn/annotations/annotations.js
         where the tuples are of the form specified in match_to_tuple()
     """
     data = []
-    annotations = []
-    with open(annotationsfile, 'r') as annotations_filehandle:
-        annotations = json.load(annotations_filehandle)
+    for root, dirs, annotationsfiles in os.walk(annotationsroot):
+        for annotationsfilename in annotationsfiles:
+            annotationsfile = os.path.join(root, annotationsfilename)
+            with open(annotationsfile, 'r') as annotations_filehandle:
+                annotations = json.load(annotations_filehandle)
 
-    for annotation in annotations:
-        imagefile = os.path.join(imageroot, annotation[JSON_FILENAME_KEY])
-        print("loading image", imagefile)
-        image = cv2.imread(imagefile)
-        matches = list(map(
-            lambda match: match_to_tuple(match, mask_resolution),
-            annotation[JSON_MATCHES_KEY]))
-        data.append((image, matches))
+            for annotation in annotations:
+                # image
+                imagefile = os.path.join(imageroot, annotation[JSON_FILENAME_KEY])
+                print("loading image", imagefile)
+                image = load_image(imagefile)
+
+                matches = list(map(
+                    lambda match: match_to_tuple(match, mask_resolution),
+                    annotation[JSON_MATCHES_KEY]))
+                data.append((image, matches))
+
     return list(zip(*data))
 
 
-def to_match_dict(label, bounding_box, mask):
-    return {
-        JSON_LABEL_KEY: label,
-        JSON_BOUNDING_BOX_KEY: bounding_box,
-        JSON_MASK_KEY: mask.tolist()
-    }
+# -------------------
+# INSPECTION TOOLS
+# -------------------
 
-
-def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
-    """Reformat dict match to tuple.
-    :param dict match: match with keys JSON_LABEL_KEY, JSON_BOUNDING_BOX_KEY, JSON_MASK_KEY
-        and values as specified for these keys
-    :param mask_resolution: resolution the mask is resized to
-    :return: tuple (label, bounding box, mask in mask_resolution)
+def draw_bounding_boxes(image, matches):
     """
-    mask = np.array(match[JSON_MASK_KEY])
-    # TODO: make resize work
-    # if (mask.shape[1], mask.shape[0]) != mask_resolution:
-    #     mask = cv2.resize(mask, mask_resolution)
-    return (
-        match[JSON_LABEL_KEY],
-        match[JSON_BOUNDING_BOX_KEY],
-        mask
-    )
+    Return the image with bounding boxes.
+    :param np.array image: image
+    :param iterator matches: list of matches as tuples
+    :return: image with bounding boxes
+    """
+    for match in matches:
+        cv2.rectangle(image,
+                      match[1][0],  # (x1, y1)
+                      match[1][1],  # (x2, y2)
+                      BOUNDING_BOX_COLOR)
+    return image
+
+
+def draw_masks(image, matches):
+    image = draw_bounding_boxes(image, matches)
+    for match in matches:
+        (x1, y1), (x2, y2) = match[1][0], match[1][1]
+        mask = simple_resize(match[2], (x2-x1, y2-y1)).astype(image.dtype)
+        image[y1:y2, x1:x2] = cv2.addWeighted(image[y1:y2, x1:x2], 1,
+                                              mask, -1,
+                                              0)
+    return image
+
+
+def draw_masks_and_labels(image, matches):
+    image = draw_masks(image, matches)
+    for match in matches:
+        label = match[0]
+        font, fontScale, thickness = cv2.FONT_HERSHEY_PLAIN, 1, 1
+
+        # background of label
+        text_width, text_height = cv2.getTextSize(label, font, fontScale, thickness)[0]
+        x1, y1 = match[1][0]
+        bottom_left_corner = (x1, y1+text_height)
+        image[y1:y1+text_height, x1:x1+text_width] = 0
+
+        # label
+        image = cv2.putText(image,
+                            label,
+                            bottom_left_corner,
+                            fontFace=font,
+                            fontScale=fontScale,
+                            color=BOUNDING_BOX_COLOR,
+                            thickness=1)
+    return image
 
 
 if __name__ == "__main__":
-    #crop_and_mask_mnist()
+    # crop_and_mask_mnist()
 
     # test create_random_image
-    # img, tags = create_random_img(debug=True)
-    # cv2.imwrite("blub.png", img)
+    #img, tags = create_random_image(debug=True)
+    #write_image("blub.png", img)
 
     # test generate_labeled_data()
-    #generate_labeled_data(num_samples=2)
-    print(load_labeled_data())
+    generate_labeled_data_files(batch_size=100, num_batches=10)
+    # data = load_labeled_data()
+    # for i in range(0, len(data)):
+    #     img = data[0][i]
+    #     matches = data[1][i]
+    #     img = draw_bounding_boxes(img, matches)
+    #     write_image("test"+i+".png", img)
 
 # image sources:
 # <a href='https://www.freepik.com/free-vector/wrinkled-paper-texture_851248.htm'>Designed by Freepik</a>
