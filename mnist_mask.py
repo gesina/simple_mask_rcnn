@@ -417,7 +417,7 @@ def to_match_dict(label, bounding_box, mask):
     }
 
 
-def match_to_tuple(match):
+def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
     """Reformat dict match to tuple.
     :param dict match: match with keys JSON_LABEL_KEY, JSON_BOUNDING_BOX_KEY, JSON_MASK_KEY
         and values as specified for these keys
