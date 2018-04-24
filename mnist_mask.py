@@ -45,7 +45,9 @@ JSON_FILENAME_KEY = "filepath"
 JSON_MASK_RESOLUTION = (14, 14) # compare letter resolution
 DATA_IMAGEROOT = "data/mask_rcnn/images"
 
-
+# --------------------
+# HELPER FUNCTIONS
+# --------------------
 
 def otherroot(imagefileroot, new_mnist_root, image_mnist_root=MNIST_PNG_FOLDER):
     """Returns (and creates) path with exchanged root folder for given image file."""
