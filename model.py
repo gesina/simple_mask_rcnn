@@ -52,9 +52,11 @@ def build_mask_rcnn_model(
 
 
 def rpn_cls_loss():
+    return 1
 
 
 def rpn_reg_loss():
+    return 1
 
 
 def build_rpn_model(model_input, anchors_per_location):
@@ -236,118 +238,141 @@ class ProposalLayer(ke.Layer):
     def call(self, inputs, **kwargs):
         """Choose proposal boxes using foreground score with non-maximum suppression.
 
-        :param inputs: consists of (all coordinates normalised):
-            - *rpn_cls*: [batch, anchors, (bg prob, fg prob)]
-            - *rpn_reg*: [batch, anchors, (dx, dy, log(dw), log(dh))]
-            - *anchors*: [batch, (x1, y1, x2, y2)] anchors in normalized coordinates
+        :param tuple inputs: consists of np.arrays (all coordinates normalised):
+            - *rpn_cls*: [batch_size, num_anchors, 2 scores (bg prob, fg prob)]
+            - *rpn_reg*: [batch_size, num_anchors, 4 coord. corrections (dx, dy, log(dw), log(dh))]
+            - *anchors*: [batch_size, 4 coord. (x1, y1, x2, y2)]
         :return: List of proposals in normalized coordinates,
-            of shape [batch, rois, (x1, y1, x2, y2)], and length self.num_proposals
+            of shape [batch_size, num_proposals, (x1, y1, x2, y2)]
             (possibly padded with 0s)
         """
         # TRIMMING
         # Improve performance by trimming to pre_nms_limit number of best anchors
         # (sorted by fg score) and doing the rest on the smaller subset.
-        self.trim_inputs(inputs)
 
-        # VARIABLES
-        rpn_cls = inputs[0]  # Box Scores
-        fg_scores = rpn_cls[:, :, 1]  # foreground class confidence. [Batch, num_rois, 1]
-        # TODO: Understand bounding box deltas
-        # Box coordinate_deltas [batch, num_rois, 4]
-        # (dx, dy, log(dw), log(dh)) -> (dx*0.1, dy*0.1, log(dw)*0.2, log(dh)*0.2)
-        rpn_reg = inputs[1] * np.reshape(self.rpn_bbox_standard_dev, [1, 1, 4])
-        anchors = inputs[2]  # Anchors
+        # TODO: Datatype ndarray?
+        proposals = []
+        # Iterate over every datum in batch
+        batch_size = tf.shape(input[0])[1]
+        for datum_idx in range(0, batch_size):
+            # datum = ((anchors, scores), (anchors, coord corr), (anchors, coord))
+            datum = (inputs[0][datum_idx], inputs[1][datum_idx], inputs[2][datum_idx])
+            datum = self.trim_to_top_anchors(datum)
 
-        # REFINED ANCHORS
-        # Apply coordinate_deltas to anchors to get refined anchor boxes.
-        # output_shape: [batch, N, (y1, x1, y2, x2)]
-        boxes = self.apply_box_deltas(anchors, rpn_reg)
+            # VARIABLES
+            rpn_cls = datum[0]  # Box Scores
+            fg_scores = rpn_cls[:, 1]  # foreground class confidence. [Batch, num_rois, 1]
+            # TODO: Understand bounding box deltas
+            # Box coordinate_deltas of shape [num_rois, 4]; do
+            # (dx, dy, log(dw), log(dh)) -> (dx*0.1, dy*0.1, log(dw)*0.2, log(dh)*0.2)
+            rpn_reg = datum[1] * np.reshape(self.rpn_bbox_standard_dev, [1, 4])
+            anchors = datum[2]
 
-        # CLIP TO IMAGE BOUNDARIES
-        # Since we're in normalized coordinates, clip to 0..1 range.
-        # output_shape: [batch, N, (y1, x1, y2, x2)]
-        window = np.array((0, 0, 1, 1), dtype=np.float32)
-        boxes = self.clip_boxes(boxes, window)
+            # REFINED ANCHORS
+            # Apply coordinate_deltas to anchors to get refined anchor boxes.
+            # output_shape: [num_anchors, (y1, x1, y2, x2)]
+            boxes = self.apply_box_deltas(anchors, rpn_reg)
 
-        # NON-MAXIMUM SUPPRESSION
-        indices_to_keep = tf.image.non_max_suppression(
-            boxes,
-            fg_scores,
-            max_output_size=self.num_proposals,
-            iou_threshold=self.nms_threshold,
-            name="rpn_non_max_suppression")
-        proposals = tf.gather(boxes, indices_to_keep)
+            # CLIP TO IMAGE BOUNDARIES
+            # Since we're in normalized coordinates, clip to 0..1 range.
+            # output_shape: [batch, N, (y1, x1, y2, x2)]
+            window = np.array((0, 0, 1, 1), dtype=np.float32)
+            boxes = self.clip_boxes(boxes, window)
 
-        # PAD WITH 0s if not enough proposals are available
-        proposals = self.pad_proposals(proposals)
+            # NON-MAXIMUM SUPPRESSION
+            indices_to_keep = tf.image.non_max_suppression(
+                boxes,
+                fg_scores,
+                max_output_size=self.num_proposals,
+                iou_threshold=self.nms_threshold,
+                name="rpn_non_max_suppression")
+            datum_proposals = tf.gather(boxes, indices_to_keep)
+
+            # PAD WITH 0s if not enough proposals are available
+            datum_proposals = self.pad_proposals(datum_proposals)
+
+            # TODO: tf.concat?
+            proposals.append(datum_proposals)
 
         return proposals
 
-    def trim_inputs(self, inputs):
-        """Trim inputs to the top self.pre_nms_limit number of anchors,
-        measured by foreground score."""
-        batch_size = tf.shape(input[0])[1]
-        pre_nms_limit = tf.minimum(self.pre_nms_limit, batch_size)
-        # Iterate over every datum in batch
-        for datum_idx in range(0, batch_size):
-            batch_fg_scores = inputs[0][datum_idx, :, 1]
-            # top k anchor indices
-            indices_to_keep = tf.nn.top_k(batch_fg_scores,
-                                          k=pre_nms_limit,
-                                          sorted=True, name="top_anchors").indices
-            # trim data to the above top k anchors
-            for i in range(0, len(inputs)):
-                inputs[i][datum_idx, :, :] = \
-                    tf.gather(inputs[i][datum_idx, :, :],
-                              indices=indices_to_keep,
-                              axis=1)  # anchor axis
+    def trim_to_top_anchors(self, datum):
+        """Trim anchors for datum to the top self.pre_nms_limit number of anchors,
+        measured by foreground score.
+
+        :param tuple datum:
+            (
+                np.array of shape [anchors, 2 scores (bg, fg)],
+                np.array of shape [anchors, 4 coord corr (dx, dy, log(dw), log(dh)],
+                np.array of shape [anchors, 4 coord (x1, y1, x2, y2)]
+            )"""
+
+        anchor_axis = 0
+        other_data_axis = 1
+        batch_fg_scores = datum[0][:, other_data_axis]
+        num_anchors = tf.shape(datum[2])[anchor_axis]
+        pre_nms_limit = tf.minimum(self.pre_nms_limit, num_anchors)
+
+        # top k anchor indices
+        indices_to_keep = tf.nn.top_k(batch_fg_scores,
+                                      k=pre_nms_limit,
+                                      sorted=True, name="top_anchors").indices
+
+        # trim all parts of the datum to the above top k anchors
+        return tuple(map(
+            lambda tensor: tf.gather(tensor,
+                                     indices=indices_to_keep,
+                                     axis=anchor_axis),
+            datum
+        ))
 
     @staticmethod
     def apply_box_deltas(boxes, deltas):
         """Applies the given deltas to the given boxes.
-        :param boxes: [N, (x1, y1, x2, y2)] boxes to update
-        :param deltas: [N, (dx, dy, log(dw), log(dh))] refinements to apply
+        :param np.array boxes: [N, 4: (x1, y1, x2, y2)] boxes to update
+        :param np.array deltas: [N, 4: (dx, dy, log(dw), log(dh))] refinements to apply
         """
-        # Convert to x, y, w, h
-        width = boxes[:, 2] - boxes[:, 0]
-        height = boxes[:, 3] - boxes[:, 1]
-        center_x = boxes[:, 0] + 0.5 * width
-        center_y = boxes[:, 1] + 0.5 * height
+        # Convert to lists with x, y, w, h each of length N
+        widths = boxes[:, 2] - boxes[:, 0]
+        heights = boxes[:, 3] - boxes[:, 1]
+        center_xs = boxes[:, 0] + 0.5 * widths
+        center_ys = boxes[:, 1] + 0.5 * heights
 
         # Apply deltas
-        center_x += deltas[:, 0] * width
-        center_y += deltas[:, 1] * height
-        width *= tf.exp(deltas[:, 2])
-        height *= tf.exp(deltas[:, 3])
+        center_xs += deltas[:, 0] * widths
+        center_ys += deltas[:, 1] * heights
+        widths *= tf.exp(deltas[:, 2])
+        heights *= tf.exp(deltas[:, 3])
 
         # Convert back to x1, y1, x2, y2
-        x1 = center_x - 0.5 * width
-        y1 = center_y - 0.5 * height
-        x2 = x1 + width
-        y2 = y1 + height
+        x1s = center_xs - 0.5 * widths
+        y1s = center_ys - 0.5 * heights
+        x2s = x1s + widths
+        y2s = y1s + heights
 
         # Name
-        result = tf.stack([x1, y1, x2, y2], axis=1, name="apply_box_deltas_out")
-        return result
+        result_coordinates = tf.stack([x1s, y1s, x2s, y2s],
+                                      axis=1, name="apply_box_deltas_out")
+        return result_coordinates
 
     @staticmethod
     def clip_boxes(boxes, window):
         """Trim boxes to fit into window.
-        :param boxes: [N, (x1, y1, x2, y2)]
-        :param window: [4] in the form (x1, y1, x2, y2)
+        :param np.array boxes: [N, 4: (x1, y1, x2, y2)]
+        :param np.array window: [4: (x1, y1, x2, y2)]
         """
-        # Split
-        x1, y1, x2, y2 = tf.split(boxes, 4, axis=1)  # lists of coordinate values
-        wx1, wy1, wx2, wy2 = tf.split(window, 4)
+        # Split into lists of coordinate values
+        x1s, y1s, x2s, y2s = tf.split(boxes, 4, axis=1)
+        win_x1s, win_y1s, win_x2s, win_y2s = tf.split(window, 4)
 
         # Clip
-        x1 = tf.maximum(tf.minimum(x1, wx2), wx1)  # overlap right: right border, overlap left: left border
-        y1 = tf.maximum(tf.minimum(y1, wy2), wy1)
-        x2 = tf.maximum(tf.minimum(x2, wx2), wx1)
-        y2 = tf.maximum(tf.minimum(y2, wy2), wy1)
-        clipped = tf.concat([y1, x1, y2, x2], axis=1, name="clipped_boxes")
-        clipped.set_shape((clipped.shape[0], 4))
-        return clipped
+        x1s = tf.maximum(tf.minimum(x1s, win_x2s), win_x1s)  # overlap right: right border, overlap left: left border
+        y1s = tf.maximum(tf.minimum(y1s, win_y2s), win_y1s)
+        x2s = tf.maximum(tf.minimum(x2s, win_x2s), win_x1s)
+        y2s = tf.maximum(tf.minimum(y2s, win_y2s), win_y1s)
+        clipped_coordinates = tf.stack([y1s, x1s, y2s, x2s],
+                                       axis=1, name="clipped_boxes")
+        return clipped_coordinates
 
     def pad_proposals(self, proposals):
         """Pad proposals with 0s until they have length self.num_proposals."""
