@@ -1,0 +1,18 @@
+# Image folders
+data/**
+MNIST-data/**
+
+# Python stuff
+venv/**
+__pycache__/**
+
+# Pycharm stuff
+.idea/**
+
+# Testing scripts
+cnn_mnist.py
+
+# Unneeded output
+**.log
+**.jpg
+**.png

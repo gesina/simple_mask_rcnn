@@ -411,7 +411,7 @@ class ProposalLayer(ke.Layer):
         proposals = []
         # TODO: use a function per_datum_in_batch instead of looping
         # Iterate over every datum in batch
-        batch_size = tf.shape(input[0])[1]
+        batch_size = tf.shape(inputs[0])[1]
         for datum_idx in range(0, batch_size):
             # GATHER ONE DATUM
             # output_shape: ([num_anchors, scores], [num_anchors, coord corr], [num_anchors, coord])

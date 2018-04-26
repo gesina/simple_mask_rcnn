@@ -25,11 +25,14 @@ TEXTURES_FOLDER = "data/textures"
 GRIDS_FOLDER = "data/grids"
 STAINS_FOLDER = "data/stains"
 
+
 def valid_colors(max_brightness):
     return tuple(((r, g, b) for r in range(0, 255)
                   for g in range(0, 255)
                   for b in range(0, 255)
                   if r + g + b < max_brightness))
+
+
 MAX_BRIGHTNESS = 200
 VALID_COLORS = {
     MAX_BRIGHTNESS: valid_colors(MAX_BRIGHTNESS)
@@ -42,8 +45,10 @@ JSON_LABEL_KEY = "label"
 JSON_BOUNDING_BOX_KEY = "bounding_box"
 JSON_FILENAME_KEY = "filepath"
 
-JSON_MASK_RESOLUTION = (14, 14) # compare letter resolution
+JSON_MASK_RESOLUTION = (14, 14)  # compare letter resolution
+DATA_ANNOTATIONSROOT = "data/mask_rcnn/annotations"
 DATA_IMAGEROOT = "data/mask_rcnn/images"
+
 
 # --------------------
 # HELPER FUNCTIONS
@@ -70,14 +75,14 @@ def resized_image_from_file(root, imagefilename,
                             fixed_scaling_factor=None):
     """Get image from file and resize by fixed_scaling_factor or randomly.
 
-    Parameters:
-        root: root of imagefile
-        imagefilename: filename
-        fixed_scaling_factor: rescale image by this factor;
+    :param str root: root of imagefile
+    :param str imagefilename: filename
+    :param float fixed_scaling_factor: rescale image by this factor;
             either this or avg_height, max_size_variance have to be set
-        avg_height, max_height_variance: if fixed_scaling_factor is not set,
+    :param int avg_height: if fixed_scaling_factor is not set,
             the image is rescaled to have a height within
             [avg_height-max_height_variance, avg_height+max_height_variance]
+    :param float max_height_variance: see avg_height
     """
     # obtain cv2 images
     imagefile = os.path.join(root, imagefilename)
@@ -158,8 +163,8 @@ def do_boxes_intersect(box, *other_boxes):
     ((x, y), (w, h)) = box
     for ((other_x, other_y), (other_w, other_h)) in other_boxes:
         # pt lies in box?
-        if ((other_x <= x <= other_x + other_w) or (x <= other_x <= x+w)) and \
-           ((other_y <= y <= other_y + other_h) or (y <= other_y <= y+h)):
+        if ((other_x <= x <= other_x + other_w) or (x <= other_x <= x + w)) and \
+                ((other_y <= y <= other_y + other_h) or (y <= other_y <= y + h)):
             return True
     return False
 
@@ -258,7 +263,7 @@ def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLU
 
             labeled_data.append((image, label, mask))
     x, label, masks = tuple(zip(*labeled_data))
-    return (np.array(x), np.array(label), np.array(masks))
+    return np.array(x), np.array(label), np.array(masks)
 
 
 def load_data(
@@ -282,7 +287,9 @@ def load_data(
 
     :param str mnist_crop_root: root folder of cropped images (.jpg or .png)
     :param str mnist_mask_root: root folder of masks (.jpg or .png)
-    :param str test_folder: folder name of
+    :param str train_folder: folder name of train data
+    :param str train_folder: folder name of test data
+    :param boolean do_resize: whether to apply the default resize function or not
    """
     print("Loading data ...")
 
@@ -365,7 +372,7 @@ def random_window(image, window_xdim, window_ydim):
 
 
 def random_coord(xmin, xmax, ymin, ymax):
-    return (random.randint(xmin, xmax), random.randint(ymin, ymax))
+    return random.randint(xmin, xmax), random.randint(ymin, ymax)
 
 
 def random_anchor(w, h, xdimension, ydimension,
@@ -378,14 +385,17 @@ def random_anchor(w, h, xdimension, ydimension,
     :param int ydimension: height of the complete image
     :param list occupied_boxes: list/tuple of boxes of the form ((x,y), (width, height))
         the window may not intersect with
+    :param valid_box_anchors: set of box anchors to randomly choose one from;
+        default: every point such that a box having its upper left corner at this point,
+        and width w, and height h does not intersect any occupied box
     :return: (x,y) valid random coordinate
     """
     if occupied_boxes is None:
         return random.randint(0, xdimension - w), random.randint(0, ydimension - h)
     valid_box_anchors = valid_box_anchors or \
                         [(x, y)
-                         for x in range(0, xdimension-w)
-                         for y in range(0, ydimension-h)
+                         for x in range(0, xdimension - w)
+                         for y in range(0, ydimension - h)
                          if not do_boxes_intersect(((x, y), (w, h)), *occupied_boxes)]
     return random.choice(valid_box_anchors)
 
@@ -457,12 +467,17 @@ def generate_random_image(
         debug=False
 ):
     """
-    :param int min_letters, max_letters: minimal and maximum number of letters per image
+    :param int min_letters: minimal number of letters per image
+    :param int max_letters: maximum number of letters per image
+    :param int min_lettersize: minimum size of a letter box in px
+    :param int max_lettersize: maximum size of a letter box in px
     :param float max_height_variance:  in [0,1]; max percentage one letter may differ from the average size
     :param int max_overlap: maximum number of pixels letter boxes may overlap
     :param int max_brightness:  in [0, 255]; maximum brightness of one color channel
     :param int max_brightness: in [0, 3*255]; maximum brightness of all letter channels together; see random_color()
     :param max_alpha: maximum
+    :param boolean debug: if set, prints (more) debugging messages,
+        and draws the masks and labels into the output image
     :return: tuple (np.array image, list matches) where
         image is a randomly created cv2 image,
         matches is a list of dicts of the form
@@ -471,8 +486,8 @@ def generate_random_image(
                 JSON_LABEL_KEY: label,
                 JSON_MATCHES_KEY: mask converted from cv2 image to nested list
             }
+        If debug is set, the masks and labels are drawn into the image.
     """
-
 
     matches = []
 
@@ -525,7 +540,7 @@ def generate_random_image(
         image[y:y + h, x:x + w] = cv2.addWeighted(image[y:y + h, x:x + w], 1, letter, -alpha, 0)
 
         # add letter mask, label, and coord. to matches
-        occupied_boxes.append(((x + max_overlap, y + max_overlap), (w-2*max_overlap, h-2*max_overlap)))
+        occupied_boxes.append(((x + max_overlap, y + max_overlap), (w - 2 * max_overlap, h - 2 * max_overlap)))
         matches.append(to_match_dict(label=label,
                                      bounding_box=((x, y), (x + w, y + h)),
                                      mask=mask))
@@ -541,9 +556,9 @@ def generate_random_image(
 
 def generate_labeled_data_files(batch_size=1000,
                                 imageroot=DATA_IMAGEROOT,
-                                annotationsroot="data/mask_rcnn/annotations",
+                                annotationsroot=DATA_ANNOTATIONSROOT,
                                 annotations_filename_format="annotations{}.json",
-                                image_filename_format = "{}.jpg",
+                                image_filename_format="{}.jpg",
                                 start_id_enumeration=1,
                                 mask_resolution=JSON_MASK_RESOLUTION,
                                 num_batches=500
@@ -565,7 +580,8 @@ def generate_labeled_data_files(batch_size=1000,
         each batch produces one annotation file under annotationsroot
     :param str imageroot: path to folder to store images in
     :param str annotationsroot: path to folder to store annotation files in
-    :param str annotations_filename_format: format string accepting the batch_id for naming the annotation files
+    :param str annotations_filename_format: format string accepting the batch_id with proper ending for naming the annotation files
+    :param str image_filename_format: format string accepting the img_id with proper ending for naming the image files
     :param int start_id_enumeration: the filenames serve as id, and are
         enumerated sequentially starting at start_id_enumeration
     :param tuple mask_resolution: resolution as (width, height) to which the mask is resized before saving
@@ -607,13 +623,14 @@ def generate_labeled_data_files(batch_size=1000,
 # LOAD TOOLS
 # -----------
 
-def load_labeled_data(annotationsroot="data/mask_rcnn/annotations",
+def load_labeled_data(annotationsroot=DATA_ANNOTATIONSROOT,
                       imageroot=DATA_IMAGEROOT,
                       mask_resolution=JSON_MASK_RESOLUTION):
     """Read in images and annotations as specified in annotationsfiles found in annotationsroot.
 
     :param str annotationsroot: path to root folder of json files with annotations
         of the format specified in generate_labeled_data()
+    :param str imageroot: root directory of the image files
     :param tuple mask_resolution: resolution as (width, height) to which the mask is resized
     :return: tuple of lists of the format
         (list of images,
@@ -664,7 +681,7 @@ def draw_masks(image, matches):
     image = draw_bounding_boxes(image, matches)
     for match in matches:
         (x1, y1), (x2, y2) = match[1][0], match[1][1]
-        mask = simple_resize(match[2], (x2-x1, y2-y1)).astype(image.dtype)
+        mask = simple_resize(match[2], (x2 - x1, y2 - y1)).astype(image.dtype)
         image[y1:y2, x1:x2] = cv2.addWeighted(image[y1:y2, x1:x2], 1,
                                               mask, -1,
                                               0)
@@ -675,20 +692,20 @@ def draw_masks_and_labels(image, matches):
     image = draw_masks(image, matches)
     for match in matches:
         label = match[0]
-        font, fontScale, thickness = cv2.FONT_HERSHEY_PLAIN, 1, 1
+        font, font_scale, thickness = cv2.FONT_HERSHEY_PLAIN, 1, 1
 
         # background of label
-        text_width, text_height = cv2.getTextSize(label, font, fontScale, thickness)[0]
+        text_width, text_height = cv2.getTextSize(label, font, font_scale, thickness)[0]
         x1, y1 = match[1][0]
-        bottom_left_corner = (x1, y1+text_height)
-        image[y1:y1+text_height, x1:x1+text_width] = 0
+        bottom_left_corner = (x1, y1 + text_height)
+        image[y1:y1 + text_height, x1:x1 + text_width] = 0
 
         # label
         image = cv2.putText(image,
                             label,
                             bottom_left_corner,
                             fontFace=font,
-                            fontScale=fontScale,
+                            fontScale=font_scale,
                             color=BOUNDING_BOX_COLOR,
                             thickness=1)
     return image
@@ -698,8 +715,8 @@ if __name__ == "__main__":
     # crop_and_mask_mnist()
 
     # test create_random_image
-    #img, tags = create_random_image(debug=True)
-    #write_image("blub.png", img)
+    # img, tags = create_random_image(debug=True)
+    # write_image("blub.png", img)
 
     # test generate_labeled_data()
     generate_labeled_data_files(batch_size=100, num_batches=10)

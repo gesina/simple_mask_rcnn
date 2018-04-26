@@ -3,17 +3,17 @@
 from __future__ import print_function
 import keras
 import mnist_mask
-#from keras.datasets import mnist
+# from keras.datasets import mnist
 from keras.models import Sequential
 from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
-from keras import backend as K
+from keras import backend as kb
 
 # CONFIG
 BATCH_SIZE = 128
 NUM_CLASSES = 10
 EPOCHS = 4
 IMG_ROWS, IMG_COLS = 28, 28
-if K.image_data_format() == 'channels_first':
+if kb.image_data_format() == 'channels_first':
     INPUT_SHAPE = (1, IMG_ROWS, IMG_COLS)
 else:
     INPUT_SHAPE = (IMG_ROWS, IMG_COLS, 1)
@@ -21,7 +21,7 @@ else:
 (x_train, y_train, mask_train), (x_test, y_test, mask_test) = mnist_mask.load_data()
 
 # INPUT
-if K.image_data_format() == 'channels_first':
+if kb.image_data_format() == 'channels_first':
     x_train = x_train.reshape(x_train.shape[0], 1, IMG_ROWS, IMG_COLS)
     x_test = x_test.reshape(x_test.shape[0], 1, IMG_ROWS, IMG_COLS)
 else:
@@ -45,10 +45,10 @@ model = Sequential([
         filters=32,
         kernel_size=(4, 4),  # should be divisible by stride
         strides=(2, 2),
-        padding="valid", # same takes ridiculously much longer
+        padding="valid",  # same takes ridiculously much longer
         activation="relu",
     ),
-    #MaxPooling2D(pool_size=(2,2)),
+    # MaxPooling2D(pool_size=(2,2)),
     Conv2D(
         filters=16,
         kernel_size=(3, 3),
