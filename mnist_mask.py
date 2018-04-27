@@ -18,7 +18,10 @@ MAX_BOUNDING_BOX_COLOR = (0, 0, 255)
 MNIST_PNG_FOLDER = "data/mnist_png"
 MNIST_CROP_ROOT = "data/mnist_crop"
 MNIST_MASK_ROOT = "data/mnist_mask"
+MIN_LETTERSIZE = 28
+MAX_LETTERSIZE = 60
 LETTER_RESOLUTION = (28, 28)
+IMAGE_RESOLUTION = (256, 256)
 
 # IMAGE GENERATION
 TEXTURES_FOLDER = "data/textures"
@@ -98,7 +101,6 @@ def resized_image_from_file(root, imagefilename,
     return image, fixed_scaling_factor
 
 
-# TODO: RoI-Align
 def simple_resize(image, dimension):
     return cv2.resize(image, dimension)
 
@@ -233,6 +235,7 @@ def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLU
     """Produce lists of (imgs, labels, masks), all images as np.array, from folder hierarchy.
 
     Needs a folder hierarchy of
+
     |-folderroot
         |-foldername
             |-folders with labels as name (e.g. 1, 2, 3 ...)
@@ -242,6 +245,10 @@ def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLU
     :param str folderroot: path to the folder
     :param tuple imagedim: dimension of the output images
     :param func resizefunc: function for resizing of the form (image, imagedim) -> resized_image
+    :return: tuple (xs, labels, masks) of lists:
+        - xs: images resized to imagedim
+        - labels: labels (int) for images
+        - masks: masks resized to imagedim
     """
     labeled_data = []
     folderpath = os.path.join(folderroot, foldername)
@@ -290,6 +297,8 @@ def load_data(
     :param str train_folder: folder name of train data
     :param str train_folder: folder name of test data
     :param boolean do_resize: whether to apply the default resize function or not
+    :return: (train, test), where each is a list of tuples (xs, labels, masks)
+        as returned by load_labeled_data_from_folder()
    """
     print("Loading data ...")
 
@@ -458,10 +467,10 @@ def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
 # -----------------------------
 def generate_random_image(
         min_letters=0, max_letters=8,
-        min_lettersize=28, max_lettersize=60,
+        min_lettersize=MIN_LETTERSIZE, max_lettersize=MAX_LETTERSIZE,
         max_overlap=5,
         max_height_variance=0.2,
-        xdimension=400, ydimension=300,
+        xdimension=IMAGE_RESOLUTION[0], ydimension=IMAGE_RESOLUTION[1],
         max_brightness=MAX_BRIGHTNESS,
         max_alpha=0.2,
         debug=False
@@ -493,7 +502,8 @@ def generate_random_image(
 
     # TEXTURE
     texturefile = random_file(TEXTURES_FOLDER)
-    # TODO: Why Error "Premature end of JPEG file"?t
+    # In case of Errors of the form "Premature end of JPEG file",
+    # ensure the images have been downloaded properly (and no .crdownload-files are processed)
     texture = load_image(os.path.join(TEXTURES_FOLDER, texturefile))
     # (randomly) extract window for image
     image = random_window(texture, xdimension, ydimension)
@@ -587,6 +597,7 @@ def generate_labeled_data_files(batch_size=1000,
     :param tuple mask_resolution: resolution as (width, height) to which the mask is resized before saving
     :return:
     """
+    # TODO: make a generator reading in only batches of certain size
     # ensure folders exist
     if not os.path.isdir(imageroot):
         os.makedirs(imageroot)

@@ -6,6 +6,8 @@ import keras.backend as kb
 import tensorflow as tf
 import numpy as np
 
+import utils
+
 
 def smooth_l1_loss(x_pred, x_true):
     """Gives the smooth L1 loss for lists of coordinates x and ground-truth coord x_gt.
@@ -29,50 +31,6 @@ def smooth_l1_loss(x_pred, x_true):
     # MEAN
     loss = kb.switch(tf.size(loss) > 0, kb.mean(loss), tf.constant(0.0))
     return loss
-
-
-# DEFAULTS
-class Config(object):
-    """Configuration parameters. To adapt, create sub-class and overwrite."""
-    # IMAGE_MATCHES_SHAPE = []
-
-    # number of different anchor shapes per center
-    NUM_ANCHOR_SHAPES = 3
-
-    # number of proposals to be processed for masks;
-    # should be higher than the the maximum number of objects with bounding boxes per image!
-    NUM_PROPOSALS = 12
-
-    # number of proposals to be processed before NMS,
-    # selected by best foreground score
-    PRE_NMS_LIMIT = 30
-
-    # threshold of foreground score for Non-Maximum Suppression
-    NMS_THRESHOLD = 0.7
-
-    IMAGE_SHAPE = [300, 300, 3]
-
-    RPN_CLS_LOSS_NAME = "rpn_cls_loss"
-    RPN_REG_LOSS_NAME = "rpn_reg_loss"
-    LOSS_LAYER_NAMES = [
-        RPN_CLS_LOSS_NAME,
-        RPN_REG_LOSS_NAME
-    ]
-    LOSS_WEIGHTS = {
-        RPN_CLS_LOSS_NAME: 1,
-        RPN_REG_LOSS_NAME: 1
-    }
-    LEARNING_RATE = 0.001
-    LEARNING_MOMENTUM = 0.9
-    WEIGHT_DECAY = 0.0001
-    GRADIENT_CLIP_NORM = 5.0
-    METRICS = ['accuracy']
-
-    BATCH_SIZE = 1
-
-    def __init__(self):
-        self.RPN_CLS_SHAPE = [self.NUM_PROPOSALS, 1]
-        self.RPN_REG_SHAPE = [self.NUM_PROPOSALS, 4]
 
 
 class MaskRCNNWrapper:
@@ -192,7 +150,7 @@ class MaskRCNNWrapper:
             anchor ground-truth objectness class
         :param np.array rpn_reg_gt: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
             ground-truth bounding box coord;
-            same order as ground-truth positive predicted bounding boxes, padded with 0s
+            same order as rpn_reg, but padded with 0s for non-positive boxes
         :param np.array rpn_reg: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
             predicted bounding box coord
         :param function loss_fn: function to be applied to box coordinates
@@ -209,12 +167,14 @@ class MaskRCNNWrapper:
         # output_shape: [num_pos_anchors, 4: (x1, y1, x2, y2)]
         rpn_reg = tf.gather_nd(rpn_reg, non_neutral_indices)
 
-        # PICK POSITIVE ANCHORS from 0-padded rpn_reg_gt
-        # Remove padding from rpn_reg_gt and flatten
-        # output: [batch_size, 1: num_pos_anchors for this batch]
-        batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
-        # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
-        rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
+        # # PICK POSITIVE ANCHORS from 0-padded rpn_reg_gt
+        # # Remove padding from rpn_reg_gt and flatten
+        # # output: [batch_size, 1: num_pos_anchors for this batch]
+        # batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
+        # # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
+        # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
+
+        rpn_reg_gt = tf.gather_nd(rpn_reg_gt, non_neutral_indices)
 
         return loss_fn(rpn_reg, rpn_reg_gt)
 
@@ -370,6 +330,34 @@ class MaskRCNNWrapper:
 
         # backbone_model = km.Model(input=image_input, output=backbone_output)
         return backbone_output
+
+    def fit_model(self,
+                  train_inputs,
+                  real_outputs=[],
+                  validation_split=None):
+        """Fit self.model.
+
+        :param list train_inputs:
+        [
+            nd.array input_image config.IMAGE_SHAPE: [batch_size, height, width, channels]
+            nd.array input_rpn_cls_gt config.RPN_CLS_SHAPE: [batch_size, num_proposals, 1],
+            nd.array input_rpn_reg_gt config.RPN_REG_SHAPE: [batch_size, num_proposals, 4: (x1, y1, x2, y2) normalized]
+        ],
+        :param list real_outputs: leave empty
+        [
+            rpn_cls_loss,  # do not consider!
+            rpn_reg_loss  # do not consider!
+        ]
+        """
+        validation_split = validation_split or self.config.VALIDATION_SPLIT
+        self.model.fit(
+            x=train_inputs,
+            y=real_outputs,
+            batch_size=self.config.BATCH_SIZE,
+            epochs=self.config.EPOCHS,
+            verbose=1,
+            validation_split=validation_split
+        )
 
 
 class ProposalLayer(ke.Layer):
