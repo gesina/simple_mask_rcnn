@@ -69,8 +69,19 @@ def write_image(imagefile, image):
     cv2.imwrite(imagefile, image)
 
 
-def load_image(imagefile):
-    return cv2.imread(imagefile)
+def load_image(imagefile, image_shape=None):
+    """Load image from file.
+
+    :param str imagefile: full path to the image to read in
+    :param tuple image_shape: shape-like tuple of at least (height, width)
+    :return: image as np.array
+    """
+    image = cv2.imread(imagefile)
+    # Resize image if it is not of required resolution
+    if image_shape is not None and \
+            (image.shape[0] != image_shape[0] or image.shape[1] != image_shape[1]):
+        image = cv2.resize(image, (image_shape[1], image_shape[0]))
+    return image
 
 
 def resized_image_from_file(root, imagefilename,
@@ -598,6 +609,7 @@ def generate_labeled_data_files(batch_size=1000,
     :return:
     """
     # TODO: make a generator reading in only batches of certain size
+    # TODO: log generation settings somewhere
     # ensure folders exist
     if not os.path.isdir(imageroot):
         os.makedirs(imageroot)
@@ -636,9 +648,12 @@ def generate_labeled_data_files(batch_size=1000,
 
 def load_labeled_data(annotationsroot=DATA_ANNOTATIONSROOT,
                       imageroot=DATA_IMAGEROOT,
-                      mask_resolution=JSON_MASK_RESOLUTION):
+                      image_shape=None,
+                      mask_resolution=JSON_MASK_RESOLUTION,
+                      verbose=True):
     """Read in images and annotations as specified in annotationsfiles found in annotationsroot.
 
+    :param image_shape:
     :param str annotationsroot: path to root folder of json files with annotations
         of the format specified in generate_labeled_data()
     :param str imageroot: root directory of the image files
@@ -658,8 +673,9 @@ def load_labeled_data(annotationsroot=DATA_ANNOTATIONSROOT,
             for annotation in annotations:
                 # image
                 imagefile = os.path.join(imageroot, annotation[JSON_FILENAME_KEY])
-                print("loading image", imagefile)
-                image = load_image(imagefile)
+                if verbose:
+                    print("Loading image from", imagefile)
+                image = load_image(imagefile, image_shape=image_shape)
 
                 matches = list(map(
                     lambda match: match_to_tuple(match, mask_resolution),

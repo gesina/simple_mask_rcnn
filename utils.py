@@ -40,19 +40,23 @@ def to_rpn_gt(boxes, anchors,
         - np.array cls_gt: [num_anchors, 1: class +1/-1/0] one row of rpn_cls_gt
         - np.array reg_gt: [num_anchors, 4: box coord (x1, y1, x2, y2)] one row of rpn_reg_gt
     """
-    cls_gt = np.zeros(shape=[len(anchors)])
-    reg_gt = np.zeros(shape=[len(anchors), 4])
+    num_anchors = anchors.shape[0]
+    num_boxes = boxes.shape[0]
+
+    # see config.RPN_???_SHAPE
+    cls_gt = np.zeros(shape=[num_anchors, 1])
+    reg_gt = np.zeros(shape=[num_anchors, 4])
 
     # calc IoUs for each box and anchor
-    ious = np.zeros(shape=[len(boxes), len(anchors)])
-    for i in range(0, len(boxes)):
-        for j in range(0, len(anchors)):
+    ious = np.zeros(shape=[num_boxes, num_anchors])
+    for i in range(0, num_boxes):
+        for j in range(0, num_anchors):
             ious[i, j] = iou(boxes[i], anchors[j])
 
     # Each box:
     #  no IoU better than min_iou_positive? -> best IoU anchor 1 (yes for this box)
-    for i in range(0, len(boxes)):
-        box_max_iou_idx = np.argmax(ious[i, :])[0]
+    for i in range(0, num_boxes):
+        box_max_iou_idx = np.argmax(ious[i, :])
         if ious[i, box_max_iou_idx] < max_iou_negative:
             cls_gt[box_max_iou_idx] = 1
             reg_gt[box_max_iou_idx, :] = boxes[i]
@@ -61,9 +65,9 @@ def to_rpn_gt(boxes, anchors,
     #  best IoU >= min_iou_positive? -> 1 (yes for that box)
     #  best IoU < min_iou_neutral? -> -1 (no)
     #  else -> 0 (stay neutral)
-    for j in range(0, len(anchors)):
+    for j in range(0, num_anchors):
         if cls_gt[j] == 0:
-            anchor_max_iou_idx = np.argmax(ious[:, j])[0]
+            anchor_max_iou_idx = np.argmax(ious[:, j])
             anchor_max_iou = ious[anchor_max_iou_idx, j]
             if anchor_max_iou >= min_iou_positive:
                 cls_gt[j] = 1
@@ -81,8 +85,8 @@ def box_raw_to_normalized(image_shape, box):
     :param box: tuple as ((x1, y1), (x2, y2))
     :return: [x1, y1, x2, y2] in normalized coordinates
     """
-    x1, y1 = conf.to_abs_coordinates(box[0][0], box[0][1], image_shape)
-    x2, y2 = conf.to_abs_coordinates(box[1][0], box[1][1], image_shape)
+    x1, y1 = conf.to_abs_coordinates(*box[0], image_shape)
+    x2, y2 = conf.to_abs_coordinates(*box[1], image_shape)
     return [x1, y1, x2, y2]
 
 
@@ -90,26 +94,40 @@ def data_generator(config):
     """Read and parse image data and metadata into Mask R-CNN model input.
 
     :param Config config: configuration
-    :return: np.array rpn_cls_gt, rpn_reg_gt as needed for losses
+    :return: images, rpn_cls_gt, rpn_reg_gt as needed for input and losses
     """
     # TODO: make data_generator a real generator to save RAM
-    images, all_matches_raw = mm.load_labeled_data()
+    images, all_matches_raw = mm.load_labeled_data(image_shape=config.IMAGE_SHAPE)
 
+    print("PARSING IMAGE DATA ...")
     rpn_cls_gt, rpn_reg_gt = [], []
     # Iterate over images
     for i in range(0, len(images)):
+        print(i)
         raw_matches = all_matches_raw[i]
-        labels, boxes, masks = zip(*raw_matches)
+        # No matches?
+        if len(raw_matches) == 0:
+            cls = np.zeros(shape=config.RPN_CLS_SHAPE)
+            reg = np.zeros(shape=config.RPN_REG_SHAPE)
+        # Yes, there are matches:
+        else:
+            labels, boxes, masks = zip(*raw_matches)
 
-        # ANCHOR CLASSES AND GROUND-TRUTH BOXES
-        # Unpack boxes to np.array with absolute coordinates
-        boxes = np.array(map(lambda box: box_raw_to_normalized(box, config.IMAGE_SHAPE), boxes))
-        # Get objectness class and (for positive ones) ground-truth box coordinates
-        # for each anchor in a list; this is one row of rpn_cls_gt, rpn_get_gt resp.
-        cls, reg = to_rpn_gt(boxes, config.ANCHOR_BOXES,
-                             max_iou_negative=config.MAX_IOU_NEGATIVE,
-                             min_iou_positive=config.MIN_IOU_POSITIVE)
+            # ANCHOR CLASSES AND GROUND-TRUTH BOXES
+            # Unpack boxes to np.array with absolute coordinates
+            boxes = list(map(lambda box: box_raw_to_normalized(box=box, image_shape=config.IMAGE_SHAPE),
+                             boxes))
+            # Get objectness class and (for positive ones) ground-truth box coordinates
+            # for each anchor in a list; this is one row of rpn_cls_gt, rpn_get_gt resp.
+            cls, reg = to_rpn_gt(np.array(boxes), np.array(config.ANCHOR_BOXES),
+                                 max_iou_negative=config.MAX_IOU_NEGATIVE,
+                                 min_iou_positive=config.MIN_IOU_POSITIVE)
         rpn_cls_gt.append(cls)
         rpn_reg_gt.append(reg)
 
-    return images, np.array(rpn_cls_gt), np.array(rpn_reg_gt)
+    images = np.array(images)
+    rpn_cls_gt = np.array(rpn_cls_gt)
+    rpn_reg_gt = np.array(rpn_reg_gt)
+    print("DTYPES: ", images.dtype, rpn_reg_gt.dtype, rpn_cls_gt.dtype)
+    print("SHAPES: ", images.shape, rpn_reg_gt.shape, rpn_cls_gt.shape)
+    return images, rpn_cls_gt, rpn_reg_gt

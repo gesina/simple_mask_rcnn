@@ -55,7 +55,8 @@ class MaskRCNNWrapper:
         backbone = self.build_backbone_model(input_image)
 
         # REGION PROPOSALS: objectness score and coordinate correction for each anchor
-        rpn_cls, rpn_cls_logits, rpn_reg = MaskRCNNWrapper.build_rpn_model(backbone, self.config.NUM_ANCHOR_SHAPES)
+        rpn_cls, rpn_cls_logits, rpn_reg = self.build_rpn_model(model_input=backbone,
+                                                                anchors_per_location=self.config.NUM_ANCHOR_SHAPES)
         # rpn_merged = kl.concatenate([rpn_cls, rpn_reg])
         # rpn_proposals = ProposalLayer(
         #     num_proposals=self.config.NUM_PROPOSALS,
@@ -123,12 +124,16 @@ class MaskRCNNWrapper:
         # PICK NON-NEUTRAL ANCHORS
         # Only +1/-1 ground-truth anchors contribute to the loss,
         # neutral anchors (gt value = 0) don't.
-        non_neutral_indices = tf.where(kb.not_equal(rpn_cls_gt, 0))  # output_shape: [batch_size, num_anchors: bools]
-        rpn_cls_gt = tf.gather_nd(rpn_cls_gt, non_neutral_indices)
+        # output_shape: [batch_size, num_anchors: bool]
+        non_neutral_indices = kb.not_equal(rpn_cls_gt, 0)
+        # output_shape: [batch_size*num_non_neutral_anchors, 1: non_neutral_anchor_idx]
+        non_neutral_indices = tf.where(non_neutral_indices)
         rpn_class_logits = tf.gather_nd(rpn_cls_logits, non_neutral_indices)
 
         # CONVERT the +1/-1 ground-truth values to 0/1 values.
         rpn_cls_gt = kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32)
+        rpn_cls_gt = tf.gather_nd(rpn_cls_gt, non_neutral_indices)
+
 
         # CROSSENTROPY LOSS
         loss = kb.sparse_categorical_crossentropy(target=rpn_cls_gt,
@@ -173,7 +178,7 @@ class MaskRCNNWrapper:
         # batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
         # # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
-
+        assert rpn_reg_gt.shape == rpn_reg.shape
         rpn_reg_gt = tf.gather_nd(rpn_reg_gt, non_neutral_indices)
 
         return loss_fn(rpn_reg, rpn_reg_gt)
@@ -195,8 +200,7 @@ class MaskRCNNWrapper:
         # concat all lists to one list of columns
         return tf.concat(outputs, axis=0)
 
-    @staticmethod
-    def build_rpn_model(model_input, anchors_per_location):
+    def build_rpn_model(self, model_input, anchors_per_location):
         """Build the RPN model.
         It consists of
             - a shared model
@@ -224,15 +228,21 @@ class MaskRCNNWrapper:
         # Each anchor gets 4 filters, each for one part of the coordinate correction:
         # dx, dy, log(dw), log(dh)
         # output_shape: [batch_size, anchors, 4]
-        rpn_reg = MaskRCNNWrapper.build_rpn_reg_model(anchors_per_location, shared)
+        rpn_reg = self.build_rpn_reg_model(anchors_per_location, shared)
 
         return rpn_cls, rpn_cls_logits, rpn_reg
 
-    @staticmethod
-    def build_rpn_reg_model(anchors_per_location, shared):
+    def build_rpn_reg_model(self, anchors_per_location, shared):
+        """
+
+        :param anchors_per_location:
+        :param shared:
+        :return: rpn_reg layer output with output_shape
+            [batch_size, num_anchors, 4: (x,y,log(w),log(h))]
+        """
         # Each anchor gets 4 filters, each for one part of the coordinate correction:
         # dx, dy, log(dw), log(dh)
-        # output_shape: [batch_size, height, width, anchors_per_location, depth=[dx,dy,log(dw),log(dh)]]
+        # output_shape: [batch_size, height, width, anchors_per_location, depth: [dx,dy,log(dw),log(dh)]]
         bbox_refinement_output = kl.Conv2D(
             filters=anchors_per_location * 4,
             kernel_size=(1, 1),
@@ -240,9 +250,11 @@ class MaskRCNNWrapper:
             activation='linear',
             name='rpn_bbox_pred'
         )(shared)
+        assert bbox_refinement_output.shape[1]*bbox_refinement_output.shape[2] == \
+            self.config.CENTER_POINTS.shape[0]
 
         # Resize
-        # output_shape: [batch_size, anchor_filterquatuples, 4 (x,y,log(w),log(h))]
+        # output_shape: [batch_size, num_anchors, 4: (dx, dy, log(dw), log(dh))]
         rpn_reg = kl.Lambda(
             lambda t: tf.reshape(
                 t, (
@@ -251,6 +263,9 @@ class MaskRCNNWrapper:
                     4)
             )
         )(bbox_refinement_output)
+
+        assert rpn_reg.shape[1] == len(self.config.ANCHOR_BOXES)
+        assert rpn_reg.shape[2] == 4
 
         return rpn_reg
 
@@ -308,7 +323,7 @@ class MaskRCNNWrapper:
             padding="same",  # same takes ridiculously much longer than valid...
             activation="relu",
         )(image_input)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2))(backbone_output)
+        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
 
         backbone_output = kl.Conv2D(
             filters=32,
@@ -316,7 +331,7 @@ class MaskRCNNWrapper:
             padding="same",  # same takes ridiculously much longer than valid...
             activation="relu",
         )(backbone_output)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2))(backbone_output)
+        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
 
         backbone_output = kl.Conv2D(
             filters=16,
@@ -324,7 +339,7 @@ class MaskRCNNWrapper:
             padding="valid",
             activation="relu",
         )(backbone_output)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2))(backbone_output)
+        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
 
         backbone_output = kl.Dropout(rate=0.25)(backbone_output)
 
@@ -332,18 +347,18 @@ class MaskRCNNWrapper:
         return backbone_output
 
     def fit_model(self,
-                  train_inputs,
-                  real_outputs=[],
+                  inputs,
+                  outputs=[],
                   validation_split=None):
         """Fit self.model.
 
-        :param list train_inputs:
+        :param list inputs:
         [
             nd.array input_image config.IMAGE_SHAPE: [batch_size, height, width, channels]
             nd.array input_rpn_cls_gt config.RPN_CLS_SHAPE: [batch_size, num_proposals, 1],
             nd.array input_rpn_reg_gt config.RPN_REG_SHAPE: [batch_size, num_proposals, 4: (x1, y1, x2, y2) normalized]
         ],
-        :param list real_outputs: leave empty
+        :param list outputs: leave empty
         [
             rpn_cls_loss,  # do not consider!
             rpn_reg_loss  # do not consider!
@@ -351,8 +366,8 @@ class MaskRCNNWrapper:
         """
         validation_split = validation_split or self.config.VALIDATION_SPLIT
         self.model.fit(
-            x=train_inputs,
-            y=real_outputs,
+            x=inputs,
+            y=outputs,
             batch_size=self.config.BATCH_SIZE,
             epochs=self.config.EPOCHS,
             verbose=1,

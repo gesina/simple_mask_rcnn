@@ -15,13 +15,14 @@ def get_center_points(center_point_width, center_point_height, col_wise=False):
     """
     num_center_pt_cols = int(round(1 / center_point_width))
     num_center_pt_rows = int(round(1 / center_point_height))
-    center_pts = np.empty(shape=[num_center_pt_rows, num_center_pt_cols])
+
+    center_pts = np.empty(shape=[num_center_pt_rows, num_center_pt_cols, 2])
 
     # Create points
     for row in range(0, num_center_pt_rows):
         for col in range(0, num_center_pt_cols):
-            center_pts[row, col] = [(col + 0.5) * center_point_width,  # x
-                                    (row + 0.5) * center_point_height]  # y
+            center_pts[row, col, 0] = (col + 0.5) * center_point_width   # x
+            center_pts[row, col, 1] = (row + 0.5) * center_point_height  # y
 
     # Concatenate;
     # If col_wise concatenation is required, transpose first
@@ -48,29 +49,34 @@ def get_anchor_boxes(center_points, anchor_shapes):
 # DEFAULTS
 class Config(object):
     """Configuration parameters. To adapt, create sub-class and overwrite."""
-    # IMAGE_MATCHES_SHAPE = []
 
-    # number of proposals to be processed for masks;
-    # should be higher than the the maximum number of objects with bounding boxes per image!
-    NUM_PROPOSALS = 12
+    ###################
+    # TRAINING CONFIG #
+    ###################
+    BATCH_SIZE = 32
+    EPOCHS = 3
+    VALIDATION_SPLIT = 0.1
 
-    # Maximum iou value of an anchor with an object's bounding box
-    # below which the anchor is considered not to contain the object.
-    MAX_IOU_NEGATIVE = 0.3
-    # Minimum iou value of an anchor with an object's bounding box
-    # above which the anchor is considered to definitely contain the object.
-    MIN_IOU_POSITIVE = 0.7
+    ####################
+    # FINE TUNE CONFIG #
+    ####################
+    # Number of proposals to be processed for masks;
+    # !! Should be higher than the the maximum number of objects with bounding boxes per image !!
+    NUM_PROPOSALS = 14
 
     # number of proposals to be processed before NMS,
     # selected by best foreground score
     PRE_NMS_LIMIT = 30
 
-    # threshold of foreground score for Non-Maximum Suppression
-    NMS_THRESHOLD = 0.7
-
     # input image shape: [height, width, channels]
     # height, width have to be divisible by 2**3!
     IMAGE_SHAPE = [256, 256, 3]
+
+    # What window size does one input pixel for the RPN region
+    # and the RPN class network correspond to?
+    # BACKBONE_DOWNSCALE * RPN_SHARED_DOWNSCALE
+    # !! Must not exceed any of the image dimensions !!
+    DOWNSCALING_FACTOR = 1 * 2 ** 3
 
     RPN_CLS_LOSS_NAME = "rpn_cls_loss"
     RPN_REG_LOSS_NAME = "rpn_reg_loss"
@@ -78,6 +84,19 @@ class Config(object):
         RPN_CLS_LOSS_NAME,
         RPN_REG_LOSS_NAME
     ]
+
+    #######################################
+    # EMPIRICAL DATA                      #
+    # copied from original implementation #
+    #######################################
+    # Maximum iou value of an anchor with an object's bounding box
+    # below which the anchor is considered not to contain the object.
+    MAX_IOU_NEGATIVE = 0.3
+
+    # Minimum iou value of an anchor with an object's bounding box
+    # above which the anchor is considered to definitely contain the object.
+    MIN_IOU_POSITIVE = 0.7
+
     LOSS_WEIGHTS = {
         RPN_CLS_LOSS_NAME: 1,
         RPN_REG_LOSS_NAME: 1
@@ -88,18 +107,9 @@ class Config(object):
     GRADIENT_CLIP_NORM = 5.0
     METRICS = ['accuracy']
 
-    BATCH_SIZE = 1
-    EPOCHS = 3
-    VALIDATION_SPLIT = 0.1
-
-    # What window size does one input pixel for the RPN region
-    # and the RPN class network correspond to?
-    # BACKBONE_DOWNSCALE * RPN_SHARED_DOWNSCALE
-    DOWNSCALING_FACTOR = 3 * (3 * 2) ** 3
-
     def __init__(self):
-        self.RPN_CLS_SHAPE = [self.NUM_PROPOSALS, 1]
-        self.RPN_REG_SHAPE = [self.NUM_PROPOSALS, 4]
+        # Threshold of foreground score for Non-Maximum Suppression
+        self.NMS_THRESHOLD = self.MIN_IOU_POSITIVE
 
         # number of different anchor shapes per center
         self.ANCHOR_SHAPES = [
@@ -120,3 +130,18 @@ class Config(object):
 
         # Get anchor box coordinates (normalized coordinates)
         self.ANCHOR_BOXES = get_anchor_boxes(self.CENTER_POINTS, self.ANCHOR_SHAPES)
+
+        # Input shapes for the RPN network: objectness class and region coordinates
+        self.RPN_CLS_SHAPE = [len(self.ANCHOR_BOXES), 1]
+        self.RPN_REG_SHAPE = [len(self.ANCHOR_BOXES), 4]
+
+        # VALIDITY CHECKS
+        self.validity_checks()
+
+    def validity_checks(self):
+        """Check validity of given entries for prototyping."""
+        assert self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[0] and \
+            self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[1]
+
+        print(len(self.CENTER_POINTS))
+
