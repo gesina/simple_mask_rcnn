@@ -24,11 +24,15 @@ if __name__ == "__main__":
     print("TRAINING ...")
     wrapper.fit_model(inputs=[images, rpn_cls_gt, rpn_reg_gt])
 
+    # TODO: Show metrics (accuracy)
+
     # SAVE MODEL
-    wrapper.model.save(MODEL_FILE)
-    wrapper.model.save_weights(MODEL_WEIGHTS_FILE)
+    # TODO: Fix saving (maybe custom layers need special treatment?)
+    #wrapper.model.save(MODEL_FILE)
+    #wrapper.model.save_weights(MODEL_WEIGHTS_FILE)
+
     # Write model to file for inspection
-    model_json = wrapper.model.to_json()
-    with open(MODEL_JSON_FILE, 'w+') as model_json_file:
-        model_json_file.write(model_json)
+    #model_json = wrapper.model.to_json()
+    # with open(MODEL_JSON_FILE, 'w+') as model_json_file:
+    #     model_json_file.write(model_json)
 

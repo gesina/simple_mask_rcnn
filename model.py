@@ -114,7 +114,7 @@ class MaskRCNNWrapper:
             * 0: neutral
 
         :param np.array rpn_cls_gt: [batch_size, num_anchors, 1] anchor ground-truth objectness class
-        :param np.array rpn_cls_logits: [batch_size, num_anchors, 2: (bg, fg)] anchor bg, fg score
+        :param np.array rpn_cls_logits: [batch_size, num_anchors, 2: (bg, fg)] anchor bg, fg score logits
         :return: np.array [1,]: loss
         """
         # Squeeze last dim
@@ -126,8 +126,10 @@ class MaskRCNNWrapper:
         # neutral anchors (gt value = 0) don't.
         # output_shape: [batch_size, num_anchors: bool]
         non_neutral_indices = kb.not_equal(rpn_cls_gt, 0)
-        # output_shape: [batch_size*num_non_neutral_anchors, 1: non_neutral_anchor_idx]
+        # output_shape: [batch_size*num_non_neutral_anchors, 2: index (batch_idx, anchor_idx)]
         non_neutral_indices = tf.where(non_neutral_indices)
+
+        # Problem: rpn_class_logits.shape == [32 (batches), 2883 (anchors instead of 3072?!), 2 (classes)]
         rpn_class_logits = tf.gather_nd(rpn_cls_logits, non_neutral_indices)
 
         # CONVERT the +1/-1 ground-truth values to 0/1 values.
@@ -178,8 +180,10 @@ class MaskRCNNWrapper:
         # batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
         # # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
-        assert rpn_reg_gt.shape == rpn_reg.shape
         rpn_reg_gt = tf.gather_nd(rpn_reg_gt, non_neutral_indices)
+
+        # rpn_reg_gt: [32, 2883, 2]
+        # indices: [31, 30, 44]
 
         return loss_fn(rpn_reg, rpn_reg_gt)
 
@@ -242,16 +246,14 @@ class MaskRCNNWrapper:
         """
         # Each anchor gets 4 filters, each for one part of the coordinate correction:
         # dx, dy, log(dw), log(dh)
-        # output_shape: [batch_size, height, width, anchors_per_location, depth: [dx,dy,log(dw),log(dh)]]
+        # output_shape: [batch_size, height, width, anchors_per_location*4: [dx,dy,log(dw),log(dh)]]
         bbox_refinement_output = kl.Conv2D(
             filters=anchors_per_location * 4,
             kernel_size=(1, 1),
-            padding="valid",
+            padding="same",
             activation='linear',
             name='rpn_bbox_pred'
         )(shared)
-        assert bbox_refinement_output.shape[1]*bbox_refinement_output.shape[2] == \
-            self.config.CENTER_POINTS.shape[0]
 
         # Resize
         # output_shape: [batch_size, num_anchors, 4: (dx, dy, log(dw), log(dh))]
@@ -264,9 +266,6 @@ class MaskRCNNWrapper:
             )
         )(bbox_refinement_output)
 
-        assert rpn_reg.shape[1] == len(self.config.ANCHOR_BOXES)
-        assert rpn_reg.shape[2] == 4
-
         return rpn_reg
 
     @staticmethod
@@ -277,13 +276,13 @@ class MaskRCNNWrapper:
         anchor_scores_output = kl.Conv2D(
             filters=2 * anchors_per_location,
             kernel_size=(1, 1),
-            padding='valid',
+            padding='same',
             activation='linear',
             name='rpn_class_raw'
         )(model_input)
 
         # Resize
-        # output_shape: [batch_size, anchor_filterpairs, 2]
+        # output_shape: [batch_size, num_anchors, 2]
         rpn_cls_logits = kl.Lambda(
             lambda t: tf.reshape(
                 t, (tf.shape(t)[0],  # batch_size
@@ -336,7 +335,7 @@ class MaskRCNNWrapper:
         backbone_output = kl.Conv2D(
             filters=16,
             kernel_size=(3, 3),
-            padding="valid",
+            padding="same",
             activation="relu",
         )(backbone_output)
         backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
