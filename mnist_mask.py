@@ -701,12 +701,12 @@ def load_labeled_data(annotationsroot=DATA_ANNOTATIONSROOT,
     """
     data = []
     for root, dirs, annotationsfiles in os.walk(annotationsroot):
-        for annotationsfilename in tqdm(annotationsfiles, "Annontationfiles:", leave=False):
+        for annotationsfilename in tqdm(annotationsfiles, "Annontationfiles", leave=False):
             annotationsfile = os.path.join(root, annotationsfilename)
             with open(annotationsfile, 'r') as annotations_filehandle:
                 annotations = json.load(annotations_filehandle)
 
-            for annotation in tqdm(annotations, "Image files:", leave=False):
+            for annotation in tqdm(annotations, "Image files", leave=False):
                 # image
                 imagefile = os.path.join(imageroot, annotation[JSON_FILENAME_KEY])
                 image, original_shape = load_image_with_resolution(imagefile, image_shape=image_shape)
@@ -753,9 +753,9 @@ def draw_masks(image, matches, color=BOUNDING_BOX_COLOR):
 
 def draw_masks_and_labels(image, matches, color=BOUNDING_BOX_COLOR):
     image = draw_masks(image, matches, color)
+    font, font_scale, thickness = cv2.FONT_HERSHEY_PLAIN, 1, 1
     for match in matches:
         label = match[0]
-        font, font_scale, thickness = cv2.FONT_HERSHEY_PLAIN, 1, 1
 
         # background of label
         text_width, text_height = cv2.getTextSize(label, font, font_scale, thickness)[0]

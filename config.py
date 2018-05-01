@@ -48,11 +48,11 @@ def get_anchor_boxes(center_points, anchor_shapes):
     :param list anchor_shapes: list of anchor shapes as (w, h) in normalized coordinates
     :return: anchor box coordinates as [x1, y1, x2, y2] in normalized coordinates
     """
-    return [
+    return np.array([
         [x - w / 2, y - h / 2, x + w / 2, y + h / 2]
         for (x, y) in center_points
         for (w, h) in anchor_shapes
-    ]
+    ])
 
 
 # DEFAULTS
@@ -123,9 +123,9 @@ class Config(object):
         # number of different anchor shapes per center
         # TODO: optimize anchor shapes
         self.ANCHOR_SHAPES = [
-            to_norm_coordinates(28, 18, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
-            to_norm_coordinates(45, 30, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
-            to_norm_coordinates(60, 40, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
+            to_norm_coordinates(18, 28, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
+            to_norm_coordinates(30, 45, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
+            to_norm_coordinates(40, 60, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
         ]
         self.NUM_ANCHOR_SHAPES = len(self.ANCHOR_SHAPES)
 

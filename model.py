@@ -38,10 +38,10 @@ class MaskRCNNWrapper:
         """
         :param Config config: configuration
         """
+        self.loss_fn = smooth_l1_loss
         self.config = config
         self.training_mode = train
         self.model = self.build_mask_rcnn_model(train, **kwargs)
-        self.loss_fn = smooth_l1_loss
 
     def build_mask_rcnn_model(self, train=True, **kwargs):
         """
@@ -61,18 +61,27 @@ class MaskRCNNWrapper:
         # All ground-truth positive and coordinate corrected anchor boxes per image;
         # in the same order (skipping negative and neutral ones) as in rpn_proposals; padded with 0s
         # shape: [batch_size, max_num_pos_anchors, 4: coord]
-        input_rpn_reg_gt = kl.Input(shape=self.config.RPN_REG_SHAPE,
-                                    name="input_rpn_reg", dtype=tf.float32)
+        input_rpn_reg_deltas_gt = kl.Input(shape=self.config.RPN_REG_SHAPE,
+                                           name="input_rpn_reg", dtype=tf.float32)
         input_anchors = kl.Input(shape=[None, 4], name="input_anchors")
 
         # COMMON BACKBONE
         backbone = self.build_backbone_model(input_image)
 
         # REGION PROPOSALS: objectness score and coordinate correction for each anchor
-        rpn_cls, rpn_cls_logits, rpn_reg = self.build_rpn_model(model_input=backbone,
-                                                                anchors_per_location=self.config.NUM_ANCHOR_SHAPES)
+        rpn_cls, rpn_cls_logits, rpn_reg_deltas = \
+            self.build_rpn_model(model_input=backbone,
+                                 anchors_per_location=self.config.NUM_ANCHOR_SHAPES)
 
-        rpn_merged = kl.concatenate([rpn_cls, rpn_reg, input_anchors],
+        # LOSS LAYERS
+        rpn_cls_loss = kl.Lambda(lambda x: self.rpn_cls_loss_fn(*x),
+                                 name=self.config.RPN_CLS_LOSS_NAME)([input_rpn_cls_gt, rpn_cls_logits])
+        rpn_reg_loss = kl.Lambda(lambda x: self.rpn_reg_loss_fn(*x),
+                                 name=self.config.RPN_REG_LOSS_NAME)(
+            [input_rpn_cls_gt, input_rpn_reg_deltas_gt, rpn_reg_deltas])
+
+        # REGION PROPOSALS: select the best ones and turn deltas to coordinates
+        rpn_merged = kl.concatenate([rpn_cls, rpn_reg_deltas, input_anchors],
                                     axis=2)
         rpn_proposals = ProposalLayer(
             num_proposals=self.config.NUM_PROPOSALS,
@@ -80,16 +89,10 @@ class MaskRCNNWrapper:
             nms_threshold=self.config.NMS_THRESHOLD
         )(rpn_merged)
 
-        # LOSS LAYERS
-        rpn_cls_loss = kl.Lambda(lambda x: self.rpn_cls_loss_fn(*x),
-                                 name=self.config.RPN_CLS_LOSS_NAME)([input_rpn_cls_gt, rpn_cls_logits])
-        rpn_reg_loss = kl.Lambda(lambda x: self.rpn_reg_loss_fn(*x),
-                                 name=self.config.RPN_REG_LOSS_NAME)([input_rpn_cls_gt, input_rpn_reg_gt, rpn_reg])
-
         # MODEL
         if train:
             # Training model
-            model = km.Model(inputs=[input_image, input_rpn_cls_gt, input_rpn_reg_gt],
+            model = km.Model(inputs=[input_image, input_rpn_cls_gt, input_rpn_reg_deltas_gt, input_anchors],
                              outputs=[rpn_cls_loss, rpn_reg_loss],
                              **kwargs)
         else:
@@ -98,6 +101,48 @@ class MaskRCNNWrapper:
                              outputs=[rpn_proposals],
                              **kwargs)
         return model
+
+    # def apply_rpn_reg_deltas(self, rpn_reg_deltas, anchors):
+    #     """Apply rpn_reg_deltas encoded as described below to the anchor boxes and get rpn_reg.
+    #
+    #     Coordinate encoding ((x1,y1) = upper left corner, (x2, y2) = lower right corner):
+    #     anchors = (x1=x_a-w_a/2, y1=y_a-h_a/2, x2=x_a+w_a/2, y2=y_a+h_a/2)
+    #     rpn_reg = (x1=x-w/2, y1=y-h/2, x2=x+w/2, y2=y+w/2)
+    #     rpn_reg_delta = ((x-x_a)/w_a, (y-y_a)/h_a, log(w/w_a), log(h/h_a))
+    #
+    #     :param np.array rpn_reg_deltas: [batch_size, num_anchors, 4: coord. deltas (dx, dy, dw, dh)]
+    #         where dx, dy, dw, dh are as described above
+    #     :param np.array anchors: [batch_size, num_anchors, 4] real anchor boxes
+    #     :return: rpn_reg [batch_size, num_anchors, 4: (x1, y1, x2, y2)] predicted bounding boxes
+    #     """
+    #     # Convert to arrays of shape [batch_size, num_anchors]
+    #     widths = anchors[:, :, 2] - anchors[:, :, 0]   # w_a
+    #     heights = anchors[:, :, 3] - anchors[:, :, 1]  # h_a
+    #     center_xs = anchors[:, :, 0] + 0.5 * widths    # x_a
+    #     center_ys = anchors[:, :, 1] + 0.5 * heights   # y_a
+    #     delta_xs = rpn_reg_deltas[:, :, 0]             # (x-x_a)/w_a
+    #     delta_ys = rpn_reg_deltas[:, :, 1]             # (y-y_a)/h_a
+    #     delta_widths = rpn_reg_deltas[:, :, 2]         # log(w/w_a)
+    #     delta_heights = rpn_reg_deltas[:, :, 3]        # log(h/h_a)
+    #
+    #     # Apply deltas
+    #     center_xs += delta_xs * widths
+    #     center_ys += delta_ys * heights
+    #     # TODO: Keep log(dw), log(dh) notation?
+    #     widths = widths * tf.exp(delta_widths)
+    #     heights = heights * tf.exp(delta_heights)
+    #
+    #     # Convert back to x1s, y1s, x2s, y2s
+    #     x1s = center_xs - 0.5 * widths
+    #     y1s = center_ys - 0.5 * heights
+    #     x2s = x1s + widths
+    #     y2s = y1s + heights
+    #
+    #     # Concat back to box coordinates tensor
+    #     # output_shape: [batch_size, num_anchors, 4]
+    #     rpn_reg = tf.stack([x1s, y1s, x2s, y2s],
+    #                        axis=2, name="apply_box_deltas_stack")
+    #     return rpn_reg
 
     def get_anchors(self, batch_size):
         """Return anchors as tensor as needed for input."""
@@ -181,7 +226,7 @@ class MaskRCNNWrapper:
         loss = kb.switch(tf.size(loss) > 0, kb.mean(loss), tf.constant(0.0))
         return loss
 
-    def rpn_reg_loss_fn(self, rpn_cls_gt, rpn_reg_gt, rpn_reg,
+    def rpn_reg_loss_fn(self, rpn_cls_gt, rpn_reg_deltas_gt, rpn_reg_deltas,
                         loss_fn=None):
         """Give the smooth L1-loss of all ground-truth positive anchors' coordinates.
         The ground-truth anchor objectness class is one of
@@ -191,10 +236,10 @@ class MaskRCNNWrapper:
 
         :param np.array rpn_cls_gt: [batch_size, num_anchors, 1]
             anchor ground-truth objectness class
-        :param np.array rpn_reg_gt: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
+        :param np.array rpn_reg_deltas_gt: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
             ground-truth bounding box coord;
             same order as rpn_reg, but padded with 0s for non-positive boxes
-        :param np.array rpn_reg: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
+        :param np.array rpn_reg_deltas: [batch_size, num_anchors, 4: (x1, y1, x2, y2)]
             predicted bounding box coord
         :param function loss_fn: function to be applied to box coordinates
             (x, y) -> loss(x,y)
@@ -210,7 +255,7 @@ class MaskRCNNWrapper:
         # output_shape: [num_pos_anchors, 2: (batch idx, anchor idx)]
         positive_indices = tf.where(kb.equal(rpn_cls_gt, 1))
         # output_shape: [num_pos_anchors, 4: (x1, y1, x2, y2)]
-        rpn_reg = tf.gather_nd(rpn_reg, positive_indices)
+        rpn_reg_deltas = tf.gather_nd(rpn_reg_deltas, positive_indices)
 
         # PICK POSITIVE ANCHORS from rpn_reg_gt
         # # Remove padding from rpn_reg_gt and flatten
@@ -218,9 +263,9 @@ class MaskRCNNWrapper:
         # batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
         # # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
-        rpn_reg_gt = tf.gather_nd(rpn_reg_gt, positive_indices)
+        rpn_reg_deltas_gt = tf.gather_nd(rpn_reg_deltas_gt, positive_indices)
 
-        return loss_fn(rpn_reg, rpn_reg_gt)
+        return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt)
 
     @staticmethod
     def batch_pack(inputs, counts, num_rows):
@@ -390,9 +435,9 @@ class MaskRCNNWrapper:
         [
             nd.array input_image config.IMAGE_SHAPE: [batch_size, height, width, channels]
             nd.array input_rpn_cls_gt config.RPN_CLS_SHAPE: [batch_size, num_proposals, 1],
-            nd.array input_rpn_reg_gt config.RPN_REG_SHAPE: [batch_size, num_proposals, 4: (x1, y1, x2, y2) normalized]
-        ],
-        :param list outputs: leave empty
+            nd.array input_rpn_reg_gt config.RPN_REG_SHAPE: [batch_size, num_proposals, 4: (dx, dy, log(dw), log(dh))]
+        ]
+        :param list outputs: leave empty due to custom losses; compare ground-truth part of input
         [
             rpn_cls_loss,  # do not consider!
             rpn_reg_loss  # do not consider!
@@ -402,6 +447,10 @@ class MaskRCNNWrapper:
         if outputs is None:
             outputs = []
         validation_split = validation_split or self.config.VALIDATION_SPLIT
+
+        num_samples = inputs[0].shape[0]
+        anchors = self.get_anchors(batch_size=num_samples)
+        inputs.append(anchors)
         self.model.fit(
             x=inputs,
             y=outputs,
@@ -483,6 +532,7 @@ class ProposalLayer(ke.Layer):
         # Apply coordinate_deltas to anchors to get refined anchor boxes.
         # output_shape: [N, 4: (x1, y1, x2, y2)]
         boxes = self.apply_box_deltas(anchors, rpn_reg)
+        boxes = rpn_reg
         # CLIP TO IMAGE BOUNDARIES
         # Since we're in normalized coordinates, clip to 0..1 range.
         window = np.array((0, 0, 1, 1), dtype=np.float32)
@@ -542,7 +592,7 @@ class ProposalLayer(ke.Layer):
         :param np.array deltas: [N, 4: (dx, dy, log(dw), log(dh))] refinements to apply
         :return: np.array [N, 4: (x1, y1, x2, y2)] updated box coordinates
         """
-        # Convert to lists with x, y, w, h each of shape [N,]
+        # Convert to (center_x, center_y, w, h) coordinate scheme, each component of shape [N,]
         widths = boxes[:, 2] - boxes[:, 0]
         heights = boxes[:, 3] - boxes[:, 1]
         center_xs = boxes[:, 0] + 0.5 * widths
@@ -551,7 +601,6 @@ class ProposalLayer(ke.Layer):
         # Apply deltas
         center_xs += deltas[:, 0] * widths
         center_ys += deltas[:, 1] * heights
-        # TODO: Keep log(dw), log(dh) notation?
         widths *= tf.exp(deltas[:, 2])
         heights *= tf.exp(deltas[:, 3])
 
