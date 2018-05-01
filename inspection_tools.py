@@ -27,10 +27,10 @@ def full_check(*folders):
 
 
 def inspect_data(num_images=40, test_folder="test"):
-    data = mnist_mask.load_labeled_data()
+    images, all_matches, _ = mnist_mask.load_labeled_data()
     for i in range(0, min(num_images, len(data[0]))):
-        img = data[0][i]
-        matches = data[1][i]
+        img = images[i]
+        matches = all_matches[i]
         img = mnist_mask.draw_masks_and_labels(img, matches)
         if img is None:
             print(i, "empty")

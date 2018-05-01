@@ -1,17 +1,26 @@
 import numpy as np
 
 
-def to_abs_coordinates(x, y, shape):
-    return x / shape[1], y / shape[0]
+def to_norm_coordinates(x, y, total_width, total_height):
+    """Reformat absolute coordinates of image of shape shape to normalized ones.
+
+    :param int x: x coordinate of pt in px
+    :param int y: y coordinate of pt in px
+    :param int total_width: total width of the image the point shall be normalized in
+    :param int total_height: total height of the image the point shall be normalized in
+    :return:
+    """
+    return x / total_width, y / total_height
 
 
 def get_center_points(center_point_width, center_point_height, col_wise=False):
     """Create list of center points of boxes of size center_point_width x center_point_height.
 
-    :param int center_point_width, int center_point_height: box size as [w, h] in normalized coordinates
+    :param int center_point_width: box width (normalized)
+    :param int center_point_height: box height (normalized)
         of the box that an upscaled center point (pixel) would take up in the image
-    :param boolean col_wise: whether to join the colums to a list instead of the rows
-    :return: list row-wise (resp. colum-wise) center points as (x, y)
+    :param boolean col_wise: whether to join the columns to a list instead of the rows
+    :return: list row-wise (resp. column-wise) center points as (x, y)
     """
     num_center_pt_cols = int(round(1 / center_point_width))
     num_center_pt_rows = int(round(1 / center_point_height))
@@ -21,7 +30,7 @@ def get_center_points(center_point_width, center_point_height, col_wise=False):
     # Create points
     for row in range(0, num_center_pt_rows):
         for col in range(0, num_center_pt_cols):
-            center_pts[row, col, 0] = (col + 0.5) * center_point_width   # x
+            center_pts[row, col, 0] = (col + 0.5) * center_point_width  # x
             center_pts[row, col, 1] = (row + 0.5) * center_point_height  # y
 
     # Concatenate;
@@ -54,7 +63,7 @@ class Config(object):
     # TRAINING CONFIG #
     ###################
     BATCH_SIZE = 32
-    EPOCHS = 3
+    EPOCHS = 5
     VALIDATION_SPLIT = 0.1
 
     ####################
@@ -112,10 +121,11 @@ class Config(object):
         self.NMS_THRESHOLD = self.MIN_IOU_POSITIVE
 
         # number of different anchor shapes per center
+        # TODO: optimize anchor shapes
         self.ANCHOR_SHAPES = [
-            to_abs_coordinates(28, 18, self.IMAGE_SHAPE),
-            to_abs_coordinates(45, 30, self.IMAGE_SHAPE),
-            to_abs_coordinates(60, 40, self.IMAGE_SHAPE)
+            to_norm_coordinates(28, 18, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
+            to_norm_coordinates(45, 30, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
+            to_norm_coordinates(60, 40, total_width=self.IMAGE_SHAPE[1], total_height=self.IMAGE_SHAPE[0]),
         ]
         self.NUM_ANCHOR_SHAPES = len(self.ANCHOR_SHAPES)
 
@@ -140,8 +150,4 @@ class Config(object):
 
     def validity_checks(self):
         """Check validity of given entries for prototyping."""
-        assert self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[0] and \
-            self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[1]
-
-        print(len(self.CENTER_POINTS))
-
+        assert self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[0] and self.DOWNSCALING_FACTOR <= self.IMAGE_SHAPE[1]

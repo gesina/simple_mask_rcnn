@@ -16,3 +16,4 @@ cnn_mnist.py
 **.log
 **.jpg
 **.png
+**.h5

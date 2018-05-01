@@ -6,8 +6,6 @@ import keras.backend as kb
 import tensorflow as tf
 import numpy as np
 
-import utils
-
 
 def smooth_l1_loss(x_pred, x_true):
     """Gives the smooth L1 loss for lists of coordinates x and ground-truth coord x_gt.
@@ -36,43 +34,51 @@ def smooth_l1_loss(x_pred, x_true):
 class MaskRCNNWrapper:
     """"""
 
-    def __init__(self, config, **kwargs):
+    def __init__(self, config, train=True, **kwargs):
         """
         :param Config config: configuration
         """
         self.config = config
-        self.model = self.build_mask_rcnn_model(**kwargs)
+        self.training_mode = train
+        self.model = self.build_mask_rcnn_model(train, **kwargs)
+        self.loss_fn = smooth_l1_loss
 
-    def build_mask_rcnn_model(self, **kwargs):
+    def build_mask_rcnn_model(self, train=True, **kwargs):
         """
+        :param boolean train: if yes, return training model (including loss layers)
         :param dict kwargs: further named parameters for keras.models.Model()
-        :return: Mask R-CNN keras model
+        :return: Mask R-CNN keras model, either for training (with losses) or for inference
         """
+        # INPUTS
         input_image = kl.Input(shape=self.config.IMAGE_SHAPE, name="input_image")
         # input_image_matches = kl.Input(shape=self.config.IMAGE_MATCHES_SHAPE, name="input_image_matches")
 
         # BACKBONE
+        # Ground-truth box inputs
+        # shape: [batch_size, num_proposals, 1: objectness class in +1/0/-1]
+        input_rpn_cls_gt = kl.Input(shape=self.config.RPN_CLS_SHAPE,
+                                    name="input_rpn_cls_gt", dtype=tf.int32)
+        # All ground-truth positive and coordinate corrected anchor boxes per image;
+        # in the same order (skipping negative and neutral ones) as in rpn_proposals; padded with 0s
+        # shape: [batch_size, max_num_pos_anchors, 4: coord]
+        input_rpn_reg_gt = kl.Input(shape=self.config.RPN_REG_SHAPE,
+                                    name="input_rpn_reg", dtype=tf.float32)
+        input_anchors = kl.Input(shape=[None, 4], name="input_anchors")
+
+        # COMMON BACKBONE
         backbone = self.build_backbone_model(input_image)
 
         # REGION PROPOSALS: objectness score and coordinate correction for each anchor
         rpn_cls, rpn_cls_logits, rpn_reg = self.build_rpn_model(model_input=backbone,
                                                                 anchors_per_location=self.config.NUM_ANCHOR_SHAPES)
-        # rpn_merged = kl.concatenate([rpn_cls, rpn_reg])
-        # rpn_proposals = ProposalLayer(
-        #     num_proposals=self.config.NUM_PROPOSALS,
-        #     pre_nms_limit=self.config.PRE_NMS_LIMIT,
-        #     nms_threshold=self.config.NMS_THRESHOLD,
-        # )
 
-        # GROUND TRUTH BOX INPUTS
-        # shape: [batch_size, num_proposals, 1: objectness class in +1/0/-1]
-        input_rpn_cls_gt = kl.Input(shape=self.config.RPN_CLS_SHAPE,
-                                    name="input_rpn_cls_gt", dtype=tf.int32)
-        # all ground-truth positive and coordinate corrected anchor boxes per image;
-        # in the same order (skipping negative and neutral ones) as in rpn_proposals; padded with 0s
-        # shape: [batch_size, max_num_pos_anchors, 4: coord]
-        input_rpn_reg_gt = kl.Input(shape=self.config.RPN_REG_SHAPE,
-                                    name="input_rpn_reg", dtype=tf.float32)
+        rpn_merged = kl.concatenate([rpn_cls, rpn_reg, input_anchors],
+                                    axis=2)
+        rpn_proposals = ProposalLayer(
+            num_proposals=self.config.NUM_PROPOSALS,
+            pre_nms_limit=self.config.PRE_NMS_LIMIT,
+            nms_threshold=self.config.NMS_THRESHOLD
+        )(rpn_merged)
 
         # LOSS LAYERS
         rpn_cls_loss = kl.Lambda(lambda x: self.rpn_cls_loss_fn(*x),
@@ -81,12 +87,27 @@ class MaskRCNNWrapper:
                                  name=self.config.RPN_REG_LOSS_NAME)([input_rpn_cls_gt, input_rpn_reg_gt, rpn_reg])
 
         # MODEL
-        model = km.Model(inputs=[input_image, input_rpn_cls_gt, input_rpn_reg_gt],
-                         outputs=[rpn_cls_loss, rpn_reg_loss],
-                         **kwargs)
+        if train:
+            # Training model
+            model = km.Model(inputs=[input_image, input_rpn_cls_gt, input_rpn_reg_gt],
+                             outputs=[rpn_cls_loss, rpn_reg_loss],
+                             **kwargs)
+        else:
+            # Inference Model: Leave out losses
+            model = km.Model(inputs=[input_image, input_anchors],
+                             outputs=[rpn_proposals],
+                             **kwargs)
         return model
 
+    def get_anchors(self, batch_size):
+        """Return anchors as tensor as needed for input."""
+        anchors_shape = [batch_size, len(self.config.ANCHOR_BOXES), 4]
+        anchors_array = np.broadcast_to(self.config.ANCHOR_BOXES,
+                                        anchors_shape)
+        return anchors_array
+
     def compile_model(self):
+        assert self.training_mode, "Can only compile a training-mode model."
         # OPTIMIZER
         optimizer = keras.optimizers.SGD(
             lr=self.config.LEARNING_RATE,
@@ -99,11 +120,29 @@ class MaskRCNNWrapper:
         # In case weights should be applied (mind: the losses are already mean values)
         loss_layer_outputs = [self.model.get_layer(ln).output * self.config.LOSS_WEIGHTS[ln]
                               for ln in self.config.LOSS_LAYER_NAMES]
-
         self.model.add_loss(losses=loss_layer_outputs)
+
         self.model.compile(optimizer=optimizer,
-                           loss=[None] * len(self.model.outputs),
-                           metrics=self.config.METRICS)
+                           loss=[None] * len(self.model.outputs))
+
+        # METRICS
+        # Add metrics for losses
+        for loss_layer_name in self.config.LOSS_LAYER_NAMES:
+            if loss_layer_name in self.model.metrics_names:
+                continue
+
+            self.model.metrics_names.append(loss_layer_name)
+
+            loss_layer = self.model.get_layer(loss_layer_name)
+            loss = (tf.reduce_mean(loss_layer.output, keepdims=True)
+                    * self.config.LOSS_WEIGHTS[loss_layer_name])
+            self.model.metrics_tensors.append(loss)
+
+    def predict(self, input_images):
+        assert not self.training_mode
+        batch_size = input_images.shape[0]
+        anchors = self.get_anchors(batch_size)
+        return self.model.predict(x=[input_images, anchors])
 
     @staticmethod
     def rpn_cls_loss_fn(rpn_cls_gt, rpn_cls_logits):
@@ -128,14 +167,11 @@ class MaskRCNNWrapper:
         non_neutral_indices = kb.not_equal(rpn_cls_gt, 0)
         # output_shape: [batch_size*num_non_neutral_anchors, 2: index (batch_idx, anchor_idx)]
         non_neutral_indices = tf.where(non_neutral_indices)
-
-        # Problem: rpn_class_logits.shape == [32 (batches), 2883 (anchors instead of 3072?!), 2 (classes)]
         rpn_class_logits = tf.gather_nd(rpn_cls_logits, non_neutral_indices)
 
         # CONVERT the +1/-1 ground-truth values to 0/1 values.
-        rpn_cls_gt = kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32)
+        rpn_cls_gt = kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32)  # -1,0->0; 1->1
         rpn_cls_gt = tf.gather_nd(rpn_cls_gt, non_neutral_indices)
-
 
         # CROSSENTROPY LOSS
         loss = kb.sparse_categorical_crossentropy(target=rpn_cls_gt,
@@ -146,7 +182,7 @@ class MaskRCNNWrapper:
         return loss
 
     def rpn_reg_loss_fn(self, rpn_cls_gt, rpn_reg_gt, rpn_reg,
-                        loss_fn=smooth_l1_loss):
+                        loss_fn=None):
         """Give the smooth L1-loss of all ground-truth positive anchors' coordinates.
         The ground-truth anchor objectness class is one of
             * 1: positive (contains object)
@@ -165,25 +201,24 @@ class MaskRCNNWrapper:
             default: smooth l1 loss;
         :return:
         """
+        if loss_fn is None:
+            loss_fn = self.loss_fn
         # PICK POSITIVE ANCHORS from rpn_reg
         # Only +1 ground-truth anchors contribute to the loss.
         # output_shape: [batch_size, num_anchors: objectness score]
         rpn_cls_gt = kb.squeeze(rpn_cls_gt, -1)
         # output_shape: [num_pos_anchors, 2: (batch idx, anchor idx)]
-        non_neutral_indices = tf.where(kb.equal(rpn_cls_gt, 1))
+        positive_indices = tf.where(kb.equal(rpn_cls_gt, 1))
         # output_shape: [num_pos_anchors, 4: (x1, y1, x2, y2)]
-        rpn_reg = tf.gather_nd(rpn_reg, non_neutral_indices)
+        rpn_reg = tf.gather_nd(rpn_reg, positive_indices)
 
-        # # PICK POSITIVE ANCHORS from 0-padded rpn_reg_gt
+        # PICK POSITIVE ANCHORS from rpn_reg_gt
         # # Remove padding from rpn_reg_gt and flatten
         # # output: [batch_size, 1: num_pos_anchors for this batch]
         # batch_counts = kb.sum(kb.cast(kb.equal(rpn_cls_gt, 1), tf.int32), axis=1)
         # # output: [num_pos_anchors, 4: (x1, y1, x2, y2)]
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
-        rpn_reg_gt = tf.gather_nd(rpn_reg_gt, non_neutral_indices)
-
-        # rpn_reg_gt: [32, 2883, 2]
-        # indices: [31, 30, 44]
+        rpn_reg_gt = tf.gather_nd(rpn_reg_gt, positive_indices)
 
         return loss_fn(rpn_reg, rpn_reg_gt)
 
@@ -347,7 +382,7 @@ class MaskRCNNWrapper:
 
     def fit_model(self,
                   inputs,
-                  outputs=[],
+                  outputs=None,
                   validation_split=None):
         """Fit self.model.
 
@@ -362,7 +397,10 @@ class MaskRCNNWrapper:
             rpn_cls_loss,  # do not consider!
             rpn_reg_loss  # do not consider!
         ]
+        :param float validation_split: percentage of the input to take for validation
         """
+        if outputs is None:
+            outputs = []
         validation_split = validation_split or self.config.VALIDATION_SPLIT
         self.model.fit(
             x=inputs,
@@ -388,7 +426,8 @@ class ProposalLayer(ke.Layer):
                  num_proposals,
                  pre_nms_limit,
                  nms_threshold,
-                 config=None, **kwargs):
+                 config=None,
+                 **kwargs):
         """
         :param int num_proposals: number of proposals to return;
             also maximum number of proposals allowed for NMS;
@@ -413,81 +452,75 @@ class ProposalLayer(ke.Layer):
     def call(self, inputs, **kwargs):
         """Choose proposal boxes using foreground score with non-maximum suppression.
 
-        :param tuple inputs: consists of np.arrays (all coordinates normalised):
-            - *rpn_cls*: [batch_size, num_anchors, 2 scores (bg prob, fg prob)]
-            - *rpn_reg*: [batch_size, num_anchors, 4 coord. corrections (dx, dy, log(dw), log(dh))]
-            - *anchors*: [batch_size, 4 coord. (x1, y1, x2, y2)]
-        :return: List of proposals in normalized coordinates,
+        :param tensor inputs: np.array of shape [batch_size, num_anchors, 2+4+4: rpn_cls+rpn_reg+anchors]
+            where the data consists of np.arrays (all coordinates normalized):
+            - *rpn_cls*: 2 scores (bg prob, fg prob)
+            - *rpn_reg*: 4 coord. corrections (dx, dy, log(dw), log(dh))
+            - *anchors*: 4 coord. (x1, y1, x2, y2)
+        :return: Tensor of proposals in normalized coordinates
             of shape [batch_size, num_proposals, (x1, y1, x2, y2)]
             (possibly padded with 0s)
         """
-        proposals = []
-        # TODO: use a function per_datum_in_batch instead of looping
         # Iterate over every datum in batch
-        batch_size = tf.shape(inputs[0])[1]
-        for datum_idx in range(0, batch_size):
-            # GATHER ONE DATUM
-            # output_shape: ([num_anchors, scores], [num_anchors, coord corr], [num_anchors, coord])
-            datum = (inputs[0][datum_idx], inputs[1][datum_idx], inputs[2][datum_idx])
+        # proposals = []
+        # for i in range(0, self.batch_size):
+        #     datum = inputs[i]
+        #     proposals.append(self.get_proposals(datum))
+        # return tf.stack(proposals, name="stack_proposals")
+        return tf.map_fn(self.get_proposals, inputs)
 
-            # TRIMMING
-            # Improve performance by trimming to max. pre_nms_limit number of best anchors
-            # (sorted by fg score) and doing the rest on the smaller subset of size N.
-            # output_shape: ([N, 2: scores], [N, 4: coord corr], [N, 4: coord])
-            datum = self.trim_to_top_anchors(datum)
-
-            # VARIABLES
-            rpn_cls = datum[0]  # Box Scores
-            fg_scores = rpn_cls[:, 1]  # Foreground class confidence of shape [N,]
-            rpn_reg = datum[1]  # Box coordinate correcition deltas of shape [N, 4]
-            anchors = datum[2]  # Anchor box coordinates of shape [N, 4]
-
-            # REFINE ANCHORS
-            # Apply coordinate_deltas to anchors to get refined anchor boxes.
-            # output_shape: [N, 4: (x1, y1, x2, y2)]
-            boxes = self.apply_box_deltas(anchors, rpn_reg)
-
-            # CLIP TO IMAGE BOUNDARIES
-            # Since we're in normalized coordinates, clip to 0..1 range.
-            window = np.array((0, 0, 1, 1), dtype=np.float32)
-            # output_shape: [N, 4: (x1, y1, x2, y2)]
-            boxes = self.clip_boxes(boxes, window)
-
-            # NON-MAXIMUM SUPPRESSION
-            # Sort by fg_score, and discard boxes that overlap with higher scored
-            # boxes too much to get n<=N, max. num_proposals, boxes.
-            indices_to_keep = tf.image.non_max_suppression(
-                boxes,
-                fg_scores,
-                max_output_size=self.num_proposals,
-                iou_threshold=self.nms_threshold,
-                name="rpn_non_max_suppression")
-            # output_shape: [n, 4: (x1, y1, x2, y2)]
-            datum_proposals = tf.gather(boxes, indices_to_keep)
-
-            # PAD WITH 0s if not enough proposals are available
-            # output_shape: [datum_idx+1: batch, self.num_proposals, 4: coord]
-            datum_proposals = self.pad_proposals(datum_proposals)
-
-            proposals.append(datum_proposals)
-
-        return tf.stack(proposals, name="stack_proposals")
+    def get_proposals(self, datum):
+        # TRIMMING
+        # Improve performance by trimming to max. pre_nms_limit number of best anchors
+        # (sorted by fg score) and doing the rest on the smaller subset of size N.
+        # output_shape: ([N, 2: scores], [N, 4: coord corr], [N, 4: coord])
+        datum = self.trim_to_top_anchors(datum)
+        # VARIABLES
+        fg_scores = datum[:, 1]  # Foreground class confidence of shape [N,]
+        rpn_reg = datum[:, 2:6]  # Box coordinate correcition deltas of shape [N, 4]
+        anchors = datum[:, 6:10]  # Anchor box coordinates of shape [N, 4]
+        # REFINE ANCHORS
+        # Apply coordinate_deltas to anchors to get refined anchor boxes.
+        # output_shape: [N, 4: (x1, y1, x2, y2)]
+        boxes = self.apply_box_deltas(anchors, rpn_reg)
+        # CLIP TO IMAGE BOUNDARIES
+        # Since we're in normalized coordinates, clip to 0..1 range.
+        window = np.array((0, 0, 1, 1), dtype=np.float32)
+        # output_shape: [N, 4: (x1, y1, x2, y2)]
+        boxes = self.clip_boxes(boxes, window)
+        # NON-MAXIMUM SUPPRESSION
+        # Sort by fg_score, and discard boxes that overlap with higher scored
+        # boxes too much to get n<=N, max. num_proposals, boxes.
+        indices_to_keep = tf.image.non_max_suppression(
+            boxes,
+            fg_scores,
+            max_output_size=self.num_proposals,
+            iou_threshold=self.nms_threshold,
+            name="rpn_non_max_suppression")
+        # output_shape: [n, 4: (x1, y1, x2, y2)]
+        datum_proposals = tf.gather(boxes, indices_to_keep)
+        # PAD WITH 0s if not enough proposals are available
+        # output_shape: [datum_idx+1: batch, self.num_proposals, 4: coord]
+        datum_proposals = self.pad_proposals(datum_proposals)
+        return datum_proposals
 
     def trim_to_top_anchors(self, datum):
         """Trim anchors for datum to the top self.pre_nms_limit number of anchors,
         measured by foreground score.
 
-        :param tuple datum:
-            (
-                np.array of shape [anchors, 2 scores (bg, fg)],
-                np.array of shape [anchors, 4 coord corr (dx, dy, log(dw), log(dh)],
-                np.array of shape [anchors, 4 coord (x1, y1, x2, y2)]
-            )"""
+        :param np.array datum: of shape
+            [
+                num_anchors,
+                2 scores (bg, fg) +
+                4 coord corr (dx, dy, log(dw), log(dh) +
+                4 coord (x1, y1, x2, y2)
+            ]
+            )
+        """
 
         anchor_axis = 0
-        other_data_axis = 1
-        batch_fg_scores = datum[0][:, other_data_axis]
-        num_anchors = tf.shape(datum[2])[anchor_axis]
+        num_anchors = tf.shape(datum)[0]
+        batch_fg_scores = datum[:, 1]
         pre_nms_limit = tf.minimum(self.pre_nms_limit, num_anchors)
 
         # top k anchor indices
@@ -495,13 +528,10 @@ class ProposalLayer(ke.Layer):
                                       k=pre_nms_limit,
                                       sorted=True, name="top_anchors").indices
 
-        # trim all parts of the datum to the above top k anchors
-        return tuple(map(
-            lambda tensor: tf.gather(tensor,
-                                     indices=indices_to_keep,
-                                     axis=anchor_axis),
-            datum
-        ))
+        # trim the datum to the above top k anchors
+        return tf.gather(datum,
+                         indices=indices_to_keep,
+                         axis=anchor_axis)
 
     @staticmethod
     def apply_box_deltas(boxes, deltas):
@@ -521,6 +551,7 @@ class ProposalLayer(ke.Layer):
         # Apply deltas
         center_xs += deltas[:, 0] * widths
         center_ys += deltas[:, 1] * heights
+        # TODO: Keep log(dw), log(dh) notation?
         widths *= tf.exp(deltas[:, 2])
         heights *= tf.exp(deltas[:, 3])
 
@@ -544,7 +575,7 @@ class ProposalLayer(ke.Layer):
         :return: np.array [N, 4: (x1, y1, x2, y2)] updated box coordinates
         """
         # Split into lists of coordinate values
-        # output_shape: 4 x [N,]
+        # output_shape: 4 x [N, 1]
         x1s, y1s, x2s, y2s = tf.split(boxes, 4, axis=1)
         win_x1s, win_y1s, win_x2s, win_y2s = tf.split(window, 4)
 
@@ -556,6 +587,7 @@ class ProposalLayer(ke.Layer):
         # output_shape: [N, 4]
         clipped_coordinates = tf.stack([y1s, x1s, y2s, x2s],
                                        axis=1, name="clipped_boxes")
+        clipped_coordinates = tf.squeeze(clipped_coordinates, -1)
         return clipped_coordinates
 
     def pad_proposals(self, proposals):
