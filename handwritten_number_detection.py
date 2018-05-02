@@ -9,7 +9,7 @@ MODEL_FILE = "rpn.h5"
 MODEL_WEIGHTS_FILE = "rpn_weights.h5"
 MODEL_JSON_FILE = "rpn.json"
 
-NUM_TEST_IMAGES = 100
+NUM_TEST_IMAGES = 10
 
 if __name__ == "__main__":
     config = Config()
@@ -29,6 +29,7 @@ if __name__ == "__main__":
 
     # TRAINING
     print("TRAINING ...")
+    print(images.shape, rpn_cls_gt.shape, rpn_reg_deltas_gt.shape)
     train_wrapper.fit_model(inputs=[images, rpn_cls_gt, rpn_reg_deltas_gt])
     # SAVE MODEL
     train_wrapper.model.save_weights(MODEL_WEIGHTS_FILE)
@@ -50,10 +51,11 @@ if __name__ == "__main__":
     num_test_images = min(len(images), NUM_TEST_IMAGES)
     test_input = images[0:num_test_images]
     test_shapes = original_shapes[0:num_test_images]
-    test_output = test_wrapper.predict(input_images=test_input)
+    test_reg_output, test_reg_deltas_output, test_cls_output = test_wrapper.predict(input_images=test_input)
     test_reg_gt = rpn_reg_gt[0:num_test_images]
     test_cls_gt = rpn_cls_gt[0:num_test_images]
     print(config.ANCHOR_BOXES[0])
-    utils.write_solutions(test_input, test_output, test_shapes, test_reg_gt,
+    utils.write_solutions(test_input, test_reg_output, test_shapes, test_reg_gt,
                           gt_cls=rpn_cls_gt, anchors=config.ANCHOR_BOXES,
+                          reg_deltas=test_reg_deltas_output, cls=test_cls_output,
                           verbose=False)

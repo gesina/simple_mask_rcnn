@@ -7,8 +7,8 @@ import tensorflow as tf
 import numpy as np
 
 
-def smooth_l1_loss(x_pred, x_true):
-    """Gives the smooth L1 loss for lists of coordinates x and ground-truth coord x_gt.
+def smooth_l1_loss(x_pred, x_true, normalization_factor):
+    """Gives the normalized, smooth L1 loss for lists of coordinates x and ground-truth coord x_gt.
     The smooth absolute value of a real number r is defined as
     `|r|_sl1 := (|r| > 1) ? |r|-0.5 : 0.5r**2` where |r| is the L1-norm (absolute value).
     The smooth L1-norm for a coordinate d=(r1, r2,..., rn) is defined as `sum_i(|ri|_sl1)`.
@@ -17,6 +17,7 @@ def smooth_l1_loss(x_pred, x_true):
 
     :param np.array x_pred: [N, coord] predicted coordinates
     :param x_true: [N, coord] ground-truth coordinates
+    :param float normalization_factor: factor to apply to sum of losses
     :return: [1,] loss
     """
     diff = kb.abs(x_true - x_pred)
@@ -26,9 +27,8 @@ def smooth_l1_loss(x_pred, x_true):
     # |d|_sl1 := (|d| > 1) ? |d|-0.5 : 0.5d**2
     loss = (less_than_one * 0.5 * diff ** 2) + (1 - less_than_one) * (diff - 0.5)
 
-    # MEAN
-    loss = kb.switch(tf.size(loss) > 0, kb.mean(loss), tf.constant(0.0))
-    return loss
+    # SUM and NORMALIZE BY normalizer
+    return tf.reduce_sum(loss) * normalization_factor
 
 
 class MaskRCNNWrapper:
@@ -98,7 +98,7 @@ class MaskRCNNWrapper:
         else:
             # Inference Model: Leave out losses
             model = km.Model(inputs=[input_image, input_anchors],
-                             outputs=[rpn_proposals],
+                             outputs=[rpn_proposals, rpn_reg_deltas, rpn_cls],
                              **kwargs)
         return model
 
@@ -146,7 +146,7 @@ class MaskRCNNWrapper:
 
     def get_anchors(self, batch_size):
         """Return anchors as tensor as needed for input."""
-        anchors_shape = [batch_size, len(self.config.ANCHOR_BOXES), 4]
+        anchors_shape = [batch_size, self.config.NUM_ANCHORS, 4]
         anchors_array = np.broadcast_to(self.config.ANCHOR_BOXES,
                                         anchors_shape)
         return anchors_array
@@ -222,7 +222,7 @@ class MaskRCNNWrapper:
         loss = kb.sparse_categorical_crossentropy(target=rpn_cls_gt,
                                                   output=rpn_class_logits,
                                                   from_logits=True)
-        # MEAN
+        # NORMALIZE BY NUMBER OF ANCHORS (=mean)
         loss = kb.switch(tf.size(loss) > 0, kb.mean(loss), tf.constant(0.0))
         return loss
 
@@ -265,7 +265,7 @@ class MaskRCNNWrapper:
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
         rpn_reg_deltas_gt = tf.gather_nd(rpn_reg_deltas_gt, positive_indices)
 
-        return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt)
+        return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
 
     @staticmethod
     def batch_pack(inputs, counts, num_rows):
@@ -316,7 +316,8 @@ class MaskRCNNWrapper:
 
         return rpn_cls, rpn_cls_logits, rpn_reg
 
-    def build_rpn_reg_model(self, anchors_per_location, shared):
+    @staticmethod
+    def build_rpn_reg_model(anchors_per_location, shared):
         """
 
         :param anchors_per_location:
@@ -367,7 +368,7 @@ class MaskRCNNWrapper:
             lambda t: tf.reshape(
                 t, (tf.shape(t)[0],  # batch_size
                     -1,  # rest
-                    2)  # fg/bg score
+                    2)  # bg/fg score
             )
         )(anchor_scores_output)
 
@@ -408,6 +409,14 @@ class MaskRCNNWrapper:
             filters=32,
             kernel_size=(3, 3),
             padding="same",  # same takes ridiculously much longer than valid...
+            activation="relu",
+        )(backbone_output)
+        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
+
+        backbone_output = kl.Conv2D(
+            filters=16,
+            kernel_size=(3, 3),
+            padding="same",
             activation="relu",
         )(backbone_output)
         backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
@@ -522,17 +531,16 @@ class ProposalLayer(ke.Layer):
         # TRIMMING
         # Improve performance by trimming to max. pre_nms_limit number of best anchors
         # (sorted by fg score) and doing the rest on the smaller subset of size N.
-        # output_shape: ([N, 2: scores], [N, 4: coord corr], [N, 4: coord])
+        # output_shape: ([N, 2 (scores) + 4 (coord corr) + 4 (coord)])
         datum = self.trim_to_top_anchors(datum)
         # VARIABLES
         fg_scores = datum[:, 1]  # Foreground class confidence of shape [N,]
-        rpn_reg = datum[:, 2:6]  # Box coordinate correcition deltas of shape [N, 4]
+        rpn_reg_deltas = datum[:, 2:6]  # Box coordinate correction deltas of shape [N, 4]
         anchors = datum[:, 6:10]  # Anchor box coordinates of shape [N, 4]
         # REFINE ANCHORS
         # Apply coordinate_deltas to anchors to get refined anchor boxes.
         # output_shape: [N, 4: (x1, y1, x2, y2)]
-        boxes = self.apply_box_deltas(anchors, rpn_reg)
-        boxes = rpn_reg
+        boxes = self.apply_box_deltas(anchors, rpn_reg_deltas)
         # CLIP TO IMAGE BOUNDARIES
         # Since we're in normalized coordinates, clip to 0..1 range.
         window = np.array((0, 0, 1, 1), dtype=np.float32)
@@ -550,7 +558,7 @@ class ProposalLayer(ke.Layer):
         # output_shape: [n, 4: (x1, y1, x2, y2)]
         datum_proposals = tf.gather(boxes, indices_to_keep)
         # PAD WITH 0s if not enough proposals are available
-        # output_shape: [datum_idx+1: batch, self.num_proposals, 4: coord]
+        # output_shape: [self.num_proposals, 4: coord]
         datum_proposals = self.pad_proposals(datum_proposals)
         return datum_proposals
 
@@ -577,7 +585,6 @@ class ProposalLayer(ke.Layer):
         indices_to_keep = tf.nn.top_k(batch_fg_scores,
                                       k=pre_nms_limit,
                                       sorted=True, name="top_anchors").indices
-
         # trim the datum to the above top k anchors
         return tf.gather(datum,
                          indices=indices_to_keep,
@@ -587,32 +594,48 @@ class ProposalLayer(ke.Layer):
     def apply_box_deltas(boxes, deltas):
         """Applies the given deltas to the given boxes.
 
+        * box center point, width, height:
+            (x_a, y_a, w_a, h_a)
+        * box coordinates:
+            (x1_a = x_a-w_a/2, y1_a = y_a-h_a/2, x2_a = x_a+w_a/2, y2_a = y_a+h_a/2)
+        * box_delta:
+            (dx = (x-x_a)/w_a, dy = (y-y_a)/h_a, log(dw=w/w_a), log(dh=h/h_a))
+        * corrected box center point, width, height:
+            (x = x_a + dx*w_a, y = y_a + dy*h_a, w_a*exp(dw), h_a*exp(dh))
+        * corrected box coordinates:
+            (x1 = x-w/2, y1 = y-h/2, x2 = x+w/2, y2 = y+w/2)
+
         All coordinates normalized.
-        :param np.array boxes: [N, 4: (x1, y1, x2, y2)] boxes to update
+        :param np.array boxes: [N, 4: (x1_a, y1_a, x2_a, y2_a)] boxes to update with deltas
         :param np.array deltas: [N, 4: (dx, dy, log(dw), log(dh))] refinements to apply
         :return: np.array [N, 4: (x1, y1, x2, y2)] updated box coordinates
         """
+        # Delta values
+        dx, dy = deltas[:, 0], deltas[:, 1]
+        dw, dh = tf.exp(deltas[:, 2]), tf.exp(deltas[:, 3])
+
         # Convert to (center_x, center_y, w, h) coordinate scheme, each component of shape [N,]
-        widths = boxes[:, 2] - boxes[:, 0]
-        heights = boxes[:, 3] - boxes[:, 1]
-        center_xs = boxes[:, 0] + 0.5 * widths
-        center_ys = boxes[:, 1] + 0.5 * heights
+        x1_a, y1_a, x2_a, y2_a = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+        w_a = x2_a - x1_a
+        h_a = y2_a - y1_a
+        center_x_a = x1_a + 0.5 * w_a
+        center_y_a = y1_a + 0.5 * h_a
 
         # Apply deltas
-        center_xs += deltas[:, 0] * widths
-        center_ys += deltas[:, 1] * heights
-        widths *= tf.exp(deltas[:, 2])
-        heights *= tf.exp(deltas[:, 3])
+        center_x = center_x_a + dx * w_a
+        center_y = center_y_a + dy * h_a
+        w = w_a * dw
+        h = h_a * dh
 
-        # Convert back to x1s, y1s, x2s, y2s
-        x1s = center_xs - 0.5 * widths
-        y1s = center_ys - 0.5 * heights
-        x2s = x1s + widths
-        y2s = y1s + heights
+        # Convert to x1, y1, x2, y2
+        x1 = center_x - 0.5 * w
+        y1 = center_y - 0.5 * h
+        x2 = x1 + w
+        y2 = y1 + h
 
         # Concat back to box coordinates tensor
         # output_shape: [N, 4]
-        result_coordinates = tf.stack([x1s, y1s, x2s, y2s],
+        result_coordinates = tf.stack([x1, y1, x2, y2],
                                       axis=1, name="apply_box_deltas_out")
         return result_coordinates
 
@@ -634,7 +657,7 @@ class ProposalLayer(ke.Layer):
         x2s = tf.maximum(tf.minimum(x2s, win_x2s), win_x1s)
         y2s = tf.maximum(tf.minimum(y2s, win_y2s), win_y1s)
         # output_shape: [N, 4]
-        clipped_coordinates = tf.stack([y1s, x1s, y2s, x2s],
+        clipped_coordinates = tf.stack([x1s, y1s, x2s, y2s],
                                        axis=1, name="clipped_boxes")
         clipped_coordinates = tf.squeeze(clipped_coordinates, -1)
         return clipped_coordinates
@@ -645,6 +668,7 @@ class ProposalLayer(ke.Layer):
         :param np.array proposals: [n, 4] list of proposed box coordinates
         :return: np.array [self.num_proposals, 4], proposals padded with 0s at the end
         """
-        padding = tf.maximum(self.num_proposals - tf.shape(proposals)[0], 0)
+        curr_num_proposals = tf.shape(proposals)[0]
+        padding = tf.maximum(self.num_proposals - curr_num_proposals, 0)
         proposals = tf.pad(proposals, [(0, padding), (0, 0)])
         return proposals

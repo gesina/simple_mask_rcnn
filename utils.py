@@ -3,7 +3,7 @@ import mnist_mask as mm
 import config as conf
 import os
 from tqdm import tqdm
-from math import log
+from math import log, exp
 
 MIN_IOU = 0.3
 
@@ -65,12 +65,49 @@ def box_to_delta(box, anchor):
     # anchor
     x1_a, y1_a, x2_a, y2_a = anchor
     w_a, h_a = x2_a - x1_a, y2_a - y1_a
-    x_a, y_a = x1_a + w_a / 2, y1_a + h_a / 2
+    x_a, y_a = x1_a + w_a / 2.0, y1_a + h_a / 2.0
 
     dx, dy = (x - x_a) / w_a, (y - y_a) / h_a
     dw, dh = log(w / w_a), log(h / h_a)
 
     return dx, dy, dw, dh
+
+
+def delta_to_box(delta, anchor):
+    """Inverse to box_to_delta:
+        * box_delta = (dx, dy, log(dw), log(dh))
+        * anchor center point, width, height = (x_a, y_a, w_a, h_a)
+        * anchor = (x1=x_a-w_a/2, y1=y_a-h_a/2, x2=x_a+w_a/2, y2=y_a+h_a/2)
+        * box center point, width, height = (x_a + dx*w_a, y_a + dy*h_a, w_a*exp(dw), h_a*exp(dh))
+        * box = (x1=x-w/2, y1=y-h/2, x2=x+w/2, y2=y+w/2)
+
+    :param tuple delta: delta values
+    :param tuple anchor: anchor coordinates
+    :return: box coordinates
+    """
+    # Deltas
+    dx, dy, logdw, logdh = delta
+
+    # Anchor
+    x1_a, y1_a, x2_a, y2_a = anchor
+    w_a = x2_a - x1_a
+    h_a = y2_a - y1_a
+    x_a = x1_a + w_a / 2.0
+    y_a = y1_a + h_a / 2.0
+
+    # Box center coordinates
+    x = x_a + dx * w_a
+    y = y_a + dy * h_a
+    w = w_a * exp(logdw)
+    h = h_a * exp(logdh)
+
+    # Box coordinates
+    x1 = x - w / 2.0
+    y1 = y - h / 2.0
+    x2 = x1 + w
+    y2 = y1 + h
+
+    return x1, y1, x2, y2
 
 
 def to_rpn_gt(boxes, anchors,
@@ -193,6 +230,7 @@ def data_from_folder(config):
         if len(raw_matches) == 0:
             cls = np.zeros(shape=config.RPN_CLS_SHAPE)
             reg = np.zeros(shape=config.RPN_REG_SHAPE)
+            reg_deltas = np.zeros(shape=config.RPN_REG_SHAPE)
         # Yes, there are matches:
         else:
             labels, boxes, masks = zip(*raw_matches)
@@ -273,19 +311,36 @@ def data_generator(config, do_check_data=False,
 
 
 def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
-                    gt_cls=None, anchors=None,
+                    gt_cls=None, anchors=None, reg_deltas=None, cls=None,
                     output_filepath_format=OUTPUT_FILEPATH_FORMAT,
                     verbose=True):
-    """Writes out bounding_box solutions for input_images to files.
+    """Writes out given boxes and other information for input_images to files.
 
-    :param np.array input_images: array of input images
-    :param np.array bounding_boxes: array of input boxes for each image
-    :param np.array gt_boxes: array of ground-truth boxes for each image if available
+    :param np.array input_images: [batch_size, height, width, channels]
+        array of input images
+    :param np.array bounding_boxes: [batch_size, num_anchors, 4: (x1,y1,x2,y2) normalized coord]
+        array of predicted bounding boxes for each image
+    :param np.array gt_boxes: [batch_size, num_anchors, 4: (x1,y1,x2,y2) normalized coord]
+        array of ground-truth boxes for each image
+    :param np.array gt_cls: [batch_size, num_anchors]
+        array of ground-truth objectness class labels (+1=object, 0=neutral, -1=no obj.)
+    :param np.array anchors: [num_anchors, 4: (x1,y1,x2,y2) normalized coord]
+        coordinates of the anchor boxes (the same for each image)
+    :param np.array reg_deltas: [batch_size, num_anchors, 4: (dx,dy,log(dw),log(dh)) normalized deltas]
+        coordinate correction deltas for anchor boxes to apply; see delta_to_box() for details on encoding
+    :param np.arary cls: [batch_size, num_anchors, 2: (bg score, fg score)]
+        predicted objectness class probabilities (non-object prob. & obj. prob.)
     :param tuple image_shapes: (width, height) in px
+        (original) shapes of the images to which to rescale before saving
     :param str output_filepath_format: format string that accepts the image index
         and filename to which the image is written; all folders have to exist
     :param boolean verbose: whether to print information on drawn boxes
     """
+    col_pred_boxes = (0, 0, 255)  # red
+    col_best_anchors = (100, 100, 0)  # dark green
+    col_pred_boxes_by_deltas = (0, 255, 0)  # green
+    col_gt_boxes = (255, 0, 0)  # blue
+
     image_idxs = range(0, input_images.shape[0])
     if not verbose:
         image_idxs = tqdm(image_idxs, "Writing image outputs")
@@ -301,7 +356,17 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
             image_width=image_width,
             image_height=image_height
         )
-        img = mm.draw_bounding_boxes(img, curr_bounding_boxes, color=mm.BOUNDING_BOX_COLOR)
+        img = mm.draw_bounding_boxes(img, curr_bounding_boxes, color=col_pred_boxes)
+
+        # Predicted bounding boxes by box deltas
+        if anchors is not None and gt_cls is not None and reg_deltas is not None:
+            curr_bounding_boxes_by_deltas = [
+                box_normalized_to_raw(list(delta_to_box(reg_deltas[img_idx, i], anchors[i])),
+                                      image_width=image_width, image_height=image_height)
+                for i in range(0, anchors.shape[0])
+                if gt_cls[img_idx, i] == 1
+            ]
+            img = mm.draw_bounding_boxes(img, curr_bounding_boxes_by_deltas, color=col_pred_boxes_by_deltas)
 
         # Ground-truth bounding boxes
         if gt_boxes is not None:
@@ -310,7 +375,7 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
                 image_width=image_width,
                 image_height=image_height
             )
-            img = mm.draw_bounding_boxes(img, curr_gt_boxes, color=mm.MAX_BOUNDING_BOX_COLOR)
+            img = mm.draw_bounding_boxes(img, curr_gt_boxes, color=col_gt_boxes)
             if verbose:
                 print("Ground-truth boxes:")
                 for b in set([(pt1, pt2) for (pt1, pt2) in curr_gt_boxes if pt1 != pt2]):
@@ -330,14 +395,21 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
             good_anchors = [curr_anchors[j]
                             for j in range(0, len(anchors))
                             if gt_cls[img_idx, j] == 1]
-            img = mm.draw_bounding_boxes(img, good_anchors, color=(255, 0, 0))
+            img = mm.draw_bounding_boxes(img, good_anchors, color=col_best_anchors)
             if verbose:
                 print("Pos:", len([cls for cls in gt_cls[img_idx] if cls == 1]),
                       "Neg:", len([cls for cls in gt_cls[img_idx] if cls == -1]),
-                      "Neutr:", len([cls for cls in gt_cls[img_idx] if cls == -1]))
+                      "Neutr:", len([cls for cls in gt_cls[img_idx] if cls == 0]))
 
         # Write to file
         filepath = output_filepath_format.format(img_idx)
         mm.write_image(filepath, img)
         if verbose:
             print("Wrote to file", filepath)
+
+        if gt_cls is not None and cls is not None:
+            cls_log = []
+            for j in range(0, gt_cls.shape[1]):
+                cls_log.append("gt/pred: " + gt_cls[img_idx, j] + "\t" + cls[img_idx, j])
+            with open("log", 'w') as logfile:
+                logfile.write("\n".join(cls_log))

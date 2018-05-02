@@ -85,7 +85,7 @@ class Config(object):
     # and the RPN class network correspond to?
     # BACKBONE_DOWNSCALE * RPN_SHARED_DOWNSCALE
     # !! Must not exceed any of the image dimensions !!
-    DOWNSCALING_FACTOR = 1 * 2 ** 3
+    DOWNSCALING_FACTOR = 1 * 2 ** 4
 
     RPN_CLS_LOSS_NAME = "rpn_cls_loss"
     RPN_REG_LOSS_NAME = "rpn_reg_loss"
@@ -140,10 +140,11 @@ class Config(object):
 
         # Get anchor box coordinates (normalized coordinates)
         self.ANCHOR_BOXES = get_anchor_boxes(self.CENTER_POINTS, self.ANCHOR_SHAPES)
+        self.NUM_ANCHORS = self.ANCHOR_BOXES.shape[0]
 
         # Input shapes for the RPN network: objectness class and region coordinates
-        self.RPN_CLS_SHAPE = [len(self.ANCHOR_BOXES), 1]
-        self.RPN_REG_SHAPE = [len(self.ANCHOR_BOXES), 4]
+        self.RPN_CLS_SHAPE = [self.NUM_ANCHORS, 1]
+        self.RPN_REG_SHAPE = [self.NUM_ANCHORS, 4]
 
         # VALIDITY CHECKS
         self.validity_checks()

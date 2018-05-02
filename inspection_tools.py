@@ -54,8 +54,8 @@ def inspect_center_points(pt_width=None):
 
     # center points
     center_points = default_config.CENTER_POINTS.tolist()
-    center_points = list(map(lambda pt: (int(round(pt[0] * img_width)),
-                                         int(round(pt[1] * img_height))),
+    center_points = list(map(lambda p: (int(round(p[0] * img_width)),
+                                        int(round(p[1] * img_height))),
                              center_points))
     for pt in center_points:
         x, y = pt
@@ -70,13 +70,6 @@ def inspect_anchors():
     img_width = default_config.IMAGE_SHAPE[1]
     img_height = default_config.IMAGE_SHAPE[0]
     img_channels = 3
-
-    # center point
-    center_points = default_config.CENTER_POINTS.tolist()
-    center_points = list(map(lambda pt: (int(round(pt[0] * img_width)),
-                                         int(round(pt[1] * img_height))),
-                             center_points))
-    center_point = center_points[512 + 32]
 
     # anchors
     anchors = default_config.ANCHOR_BOXES
@@ -101,4 +94,7 @@ if __name__ == "__main__":
     # full_check("data/textures", "data/grids", "data/stains")
     # full_check("data/mask_rcnn/images")
     # inspect_data(num_images=200)
+    inspect_center_points(pt_width=1)
     inspect_anchors()
+    config = Config()
+    print(config.NUM_ANCHORS)
