@@ -4,12 +4,14 @@ import config as conf
 import os
 from tqdm import tqdm
 from math import log, exp
+import random
 
 MIN_IOU = 0.3
 
 NPY_FOLDER = "data/mask_rcnn/prepared_npy"
 NPY_IMAGES_FILENAME = "images.npy"
 NPY_RPN_CLS_FILENAME = "rpn_cls.npy"
+NPY_RPN_CLS_TRAINING_FILENAME = "rpn_cls_train.npy"
 NPY_RPN_REG_FILENAME = "rpn_reg.npy"
 NPY_RPN_REG_DELTAS_FILENAME = "rpn_reg_deltas.npy"
 NPY_ORIGINAL_SHAPES_FILENAME = "orig_shapes.npy"
@@ -17,10 +19,12 @@ NPY_ORIGINAL_SHAPES_FILENAME = "orig_shapes.npy"
 # Mind the order!
 NPY_FILENAMES = (NPY_IMAGES_FILENAME,
                  NPY_RPN_CLS_FILENAME,
+                 NPY_RPN_CLS_TRAINING_FILENAME,
                  NPY_RPN_REG_FILENAME,
                  NPY_RPN_REG_DELTAS_FILENAME,
                  NPY_ORIGINAL_SHAPES_FILENAME)
 OUTPUT_FILEPATH_FORMAT = "data/mask_rcnn/test/test{}.jpg"
+LOGFILEPATH = "log"
 
 
 def iou(box1, box2):
@@ -209,6 +213,32 @@ def boxes_normalized_to_raw(boxes, image_width, image_height):
     ))
 
 
+def randomly_balance_pos_neg_samples(cls):
+    """Balance the number of positive and negative objectness class samples
+    by randomly setting enough negative samples to neutral.
+
+    :param np.array cls: [num_anchors, 1: class +1/-1/0]
+        ground truth values of objectness classes for one image's anchors;
+            * +1: positive
+            * -1: negative
+            * 0: neutral (does not contribute to training loss)
+    :return: cls with only an equal amount of positive and negative samples;
+        the rest of the negative samples set to neutral (0)
+    """
+    num_positive_samples = int(np.sum(cls == 1))
+    negative_indices = np.nonzero(cls == -1)[0].tolist()
+    max_num_negative_samples = min(num_positive_samples, len(negative_indices))
+
+    rand_negative_indices = random.sample(negative_indices, max_num_negative_samples)
+
+    # Set all negative samples to neutral
+    cls[cls == -1] = 0
+    # Set max_num_negative_samples of the negative samples back to negative
+    cls[rand_negative_indices] = -1
+
+    return cls
+
+
 def data_from_folder(config):
     """Read and parse image data and metadata into Mask R-CNN model input.
 
@@ -219,9 +249,10 @@ def data_from_folder(config):
     # TODO: make data_generator a real generator to save RAM
     images, all_matches_raw, original_shapes = mm.load_labeled_data(image_shape=config.IMAGE_SHAPE)
 
-    rpn_cls_gt, rpn_reg_gt, rpn_reg_deltas_gt = [], [], []
+    train_images, rpn_cls_gt, rpn_cls_gt_training, rpn_reg_gt, rpn_reg_deltas_gt = [], [], [], [], []
     # Iterate over images
     for i in tqdm(range(0, len(images)), "Parsing image files"):
+        image = images[i]
         raw_matches = all_matches_raw[i]
         original_shape = original_shapes[i]
         image_width, image_height = original_shape[1], original_shape[0]
@@ -245,16 +276,22 @@ def data_from_folder(config):
             cls, reg, reg_deltas = to_rpn_gt(np.array(boxes), np.array(config.ANCHOR_BOXES),
                                              max_iou_negative=config.MAX_IOU_NEGATIVE,
                                              min_iou_positive=config.MIN_IOU_POSITIVE)
-        rpn_cls_gt.append(cls)
-        rpn_reg_gt.append(reg)
-        rpn_reg_deltas_gt.append(reg_deltas)
+        # TODO: Find more efficient way to generate repetitions with different balances
+        for rep in range(0, config.NUM_BALANCED_REPETITIONS):
+            train_images.append(image)
+            rpn_cls_gt.append(cls)
+            rpn_cls_gt_training.append(randomly_balance_pos_neg_samples(np.copy(cls)))
+            rpn_reg_gt.append(reg)
+            rpn_reg_deltas_gt.append(reg_deltas)
 
-    images = np.array(images)
+    train_images = np.array(train_images)
     rpn_cls_gt = np.array(rpn_cls_gt)
+    rpn_cls_gt_training = np.array(rpn_cls_gt_training)
     rpn_reg_gt = np.array(rpn_reg_gt)
     rpn_reg_deltas_gt = np.array(rpn_reg_deltas_gt)
     original_shapes = np.array(original_shapes)
-    return images, rpn_cls_gt, rpn_reg_gt, rpn_reg_deltas_gt, original_shapes
+
+    return train_images, rpn_cls_gt, rpn_cls_gt_training, rpn_reg_gt, rpn_reg_deltas_gt, original_shapes
 
 
 def check_data(warning_message_format="WARNING: Data {} containing {} values!",
@@ -280,7 +317,6 @@ def check_data(warning_message_format="WARNING: Data {} containing {} values!",
 
 def data_generator(config, do_check_data=False,
                    npy_filenames=NPY_FILENAMES):
-    # TODO: Reduce code replications
     npy_filepaths = [os.path.join(NPY_FOLDER, fn) for fn in npy_filenames]
 
     # No .npy files yet?
@@ -289,13 +325,8 @@ def data_generator(config, do_check_data=False,
     if any([not os.path.isfile(f) for f in npy_filepaths]):
         data_tuple = data_from_folder(config)
         print("Saving parsed data ...")
-        for i in range(0, len(data_tuple)):
+        for i in tqdm(range(0, len(data_tuple)), ".npy files written"):
             data_tuple[i].dump(npy_filepaths[i])
-        # images, rpn_cls_gt, rpn_reg_gt, rpn_reg_deltas_gt, original_shapes = data_from_folder(config)
-        # images.dump(images_npy)
-        # rpn_cls_gt.dump(rpn_cls_npy)
-        # rpn_reg_gt.dump(rpn_reg_npy)
-        # original_shapes.dump(original_shapes_npy)
         do_check_data = True  # check newly adquired data!
     else:
         print("Loading image data ...")
@@ -311,7 +342,8 @@ def data_generator(config, do_check_data=False,
 
 
 def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
-                    gt_cls=None, anchors=None, reg_deltas=None, cls=None,
+                    gt_cls=None, anchors=None, reg_deltas=None,
+                    cls=None, train_cls=None,
                     output_filepath_format=OUTPUT_FILEPATH_FORMAT,
                     verbose=True):
     """Writes out given boxes and other information for input_images to files.
@@ -330,6 +362,9 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
         coordinate correction deltas for anchor boxes to apply; see delta_to_box() for details on encoding
     :param np.arary cls: [batch_size, num_anchors, 2: (bg score, fg score)]
         predicted objectness class probabilities (non-object prob. & obj. prob.)
+    :param np.arary train_cls: [batch_size, num_anchors, 1: fg score]
+        objectness class probabilities taken for training
+        (differs from gt_cls due to balancing, see randomly_balance_pos_neg_samples)
     :param tuple image_shapes: (width, height) in px
         (original) shapes of the images to which to rescale before saving
     :param str output_filepath_format: format string that accepts the image index
@@ -340,6 +375,18 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
     col_best_anchors = (100, 100, 0)  # dark green
     col_pred_boxes_by_deltas = (0, 255, 0)  # green
     col_gt_boxes = (255, 0, 0)  # blue
+
+    print("Output image files are", OUTPUT_FILEPATH_FORMAT)
+    print("Writing predicted boxes:  yes")
+    print("Writing predicted boxes by deltas: ",
+          "yes" if anchors is not None and gt_cls is not None and reg_deltas is not None else "no")
+    print("Writing ground-truth boxes: ", "yes" if gt_boxes is not None else "no")
+    print("Writing best anchor boxes: ", "yes" if anchors is not None and gt_cls is not None else "no")
+    print("Logging ground-truth classes to", LOGFILEPATH, ":", "yes" if gt_cls is not None else "no")
+    print("Logging ground-truth training classes to", LOGFILEPATH, ":", "yes" if train_cls is not None else "no")
+    print("Logging predicted classes to", LOGFILEPATH, ":", "yes" if cls is not None else "no")
+    if os.path.isfile(LOGFILEPATH):
+        raise FileExistsError("Logfile " + LOGFILEPATH + " exists!")
 
     image_idxs = range(0, input_images.shape[0])
     if not verbose:
@@ -407,9 +454,16 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
         if verbose:
             print("Wrote to file", filepath)
 
-        if gt_cls is not None and cls is not None:
+        # Log gt/training/predicted classes
+        if gt_cls is not None or train_cls is not None or cls is not None:
             cls_log = []
-            for j in range(0, gt_cls.shape[1]):
-                cls_log.append("gt/pred: " + gt_cls[img_idx, j] + "\t" + cls[img_idx, j])
-            with open("log", 'w') as logfile:
-                logfile.write("\n".join(cls_log))
+            num_anchors = gt_cls.shape[1] if gt_cls is not None \
+                else train_cls.shape[1] if train_cls is not None \
+                else cls.shape[1]
+            for j in range(0, num_anchors):
+                cls_log.append(
+                    "\t".join([str(cls_arr[img_idx, j])
+                               for cls_arr in (gt_cls, train_cls, cls)
+                               if cls_arr is not None]))
+            with open(LOGFILEPATH, 'a') as logfile:
+                logfile.write("\n\n" + filepath + "\n".join(cls_log))

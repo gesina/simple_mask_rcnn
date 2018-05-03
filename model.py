@@ -21,7 +21,7 @@ def smooth_l1_loss(x_pred, x_true, normalization_factor):
     :return: [1,] loss
     """
     diff = kb.abs(x_true - x_pred)
-    less_than_one = kb.cast(kb.less(diff, 1.0), "float32")
+    less_than_one = kb.cast(kb.less(diff, 1.0), 'float32')
 
     # SMOOTH L1 LOSS in each coord:
     # |d|_sl1 := (|d| > 1) ? |d|-0.5 : 0.5d**2
@@ -128,7 +128,6 @@ class MaskRCNNWrapper:
     #     # Apply deltas
     #     center_xs += delta_xs * widths
     #     center_ys += delta_ys * heights
-    #     # TODO: Keep log(dw), log(dh) notation?
     #     widths = widths * tf.exp(delta_widths)
     #     heights = heights * tf.exp(delta_heights)
     #
@@ -162,6 +161,9 @@ class MaskRCNNWrapper:
         )
 
         # LOSSES
+        # Clear losses
+        self.model._losses = []
+        self.model._per_input_losses = {}
         # In case weights should be applied (mind: the losses are already mean values)
         loss_layer_outputs = [self.model.get_layer(ln).output * self.config.LOSS_WEIGHTS[ln]
                               for ln in self.config.LOSS_LAYER_NAMES]
@@ -267,22 +269,22 @@ class MaskRCNNWrapper:
 
         return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
 
-    @staticmethod
-    def batch_pack(inputs, counts, num_rows):
-        """Flatten tensor along axis=0 (rows),
-        for each row picking only the first counts[row] columns.
-
-        :param nd.array inputs: [num_rows,] + inputs.shape[1:] tensor to be flattened and cropped
-        :param nd.array counts: [num_rows, 1: num cols for this row]
-        :param int num_rows: number of rows of inputs (should be inputs.shape[0])
-        :return: [sum(counts),] + inputs.shape[1:]
-        """
-        outputs = []
-        for i in range(0, num_rows):
-            # add list of first counts[i] columns of ith row
-            outputs.append(inputs[i, :counts[i]])
-        # concat all lists to one list of columns
-        return tf.concat(outputs, axis=0)
+    # @staticmethod
+    # def batch_pack(inputs, counts, num_rows):
+    #     """Flatten tensor along axis=0 (rows),
+    #     for each row picking only the first counts[row] columns.
+    #
+    #     :param nd.array inputs: [num_rows,] + inputs.shape[1:] tensor to be flattened and cropped
+    #     :param nd.array counts: [num_rows, 1: num cols for this row]
+    #     :param int num_rows: number of rows of inputs (should be inputs.shape[0])
+    #     :return: [sum(counts),] + inputs.shape[1:]
+    #     """
+    #     outputs = []
+    #     for i in range(0, num_rows):
+    #         # add list of first counts[i] columns of ith row
+    #         outputs.append(inputs[i, :counts[i]])
+    #     # concat all lists to one list of columns
+    #     return tf.concat(outputs, axis=0)
 
     def build_rpn_model(self, model_input, anchors_per_location):
         """Build the RPN model.
@@ -331,12 +333,12 @@ class MaskRCNNWrapper:
         bbox_refinement_output = kl.Conv2D(
             filters=anchors_per_location * 4,
             kernel_size=(1, 1),
-            padding="same",
+            padding='same',
             activation='linear',
-            name='rpn_bbox_pred'
+            name="rpn_bbox_pred"
         )(shared)
 
-        # Resize
+        # Resize: row-wise concat anchors to list
         # output_shape: [batch_size, num_anchors, 4: (dx, dy, log(dw), log(dh))]
         rpn_reg = kl.Lambda(
             lambda t: tf.reshape(
@@ -351,18 +353,22 @@ class MaskRCNNWrapper:
 
     @staticmethod
     def build_rpn_cls_model(anchors_per_location, model_input):
-        """Model for getting anchor scores from rpn_shared_model."""
+        """Model for getting anchor scores from rpn_shared_model.
+
+        This yields an objectness score as (non-obj score, obj score) for each
+        anchor based on the sliding window evaluated in the rpn_shared_model.
+        """
         # Each anchor gets two filters, one for fg score, one for bg score
         # output_shape: [batch_size, height, width, anchors_per_location*2]
         anchor_scores_output = kl.Conv2D(
             filters=2 * anchors_per_location,
             kernel_size=(1, 1),
             padding='same',
-            activation='linear',
-            name='rpn_class_raw'
+            activation='relu',
+            name="rpn_class_raw"
         )(model_input)
 
-        # Resize
+        # Resize: row-wise concat anchors to list
         # output_shape: [batch_size, num_anchors, 2]
         rpn_cls_logits = kl.Lambda(
             lambda t: tf.reshape(
@@ -375,18 +381,24 @@ class MaskRCNNWrapper:
         # Softmax: produce cls prediction
         # output_shape: as above
         rpn_cls = kl.Activation(
-            "softmax", name="rpn_cls")(rpn_cls_logits)
+            'softmax', name="rpn_cls")(rpn_cls_logits)
 
         return rpn_cls, rpn_cls_logits
 
     @staticmethod
     def build_rpn_shared_model(model_input):
+        """Output of shared ConvLayer for region proposal parts.
+
+        This emulates the sliding window which is evaluated by the coordinate correction
+        estimator and the objectness class estimator.
+        Thus choose the kernel_size (=sliding window size) such that a typical object fits
+        inside the kernel window."""
         shared_output = kl.Conv2D(
             filters=32,
-            kernel_size=(3, 3),
-            padding="same",  # same takes ridiculously much longer than valid...
-            activation="relu",
-            name='rpn_conv_shared'
+            kernel_size=(5, 5),
+            padding='same',  # same takes ridiculously much longer than valid...
+            activation='relu',
+            name="rpn_conv_shared"
         )(model_input)
         return shared_output
 
@@ -394,45 +406,70 @@ class MaskRCNNWrapper:
     def build_backbone_model(image_input):
         """Build convolutional backbone model.
 
+        Mind to set self.config.DOWNSCALING_FACTOR to this model's downscaling rate.
+
         :param tuple image_input: keras.layers.Input(); shape should be divisible by 2**3
         :return: backbone_model as layer output
         """
-        backbone_output = kl.Conv2D(
+        # CONV1: 5x5 Conv, MaxPooling
+        out = kl.Conv2D(
             filters=32,
-            kernel_size=(3, 3),
-            padding="same",  # same takes ridiculously much longer than valid...
-            activation="relu",
+            kernel_size=(5, 5),
+            padding='same',  # same takes ridiculously much longer than valid...
+            activation='relu',
+            name="backbone_conv1"
         )(image_input)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
+        out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool1")(out)
 
-        backbone_output = kl.Conv2D(
+        # CONV2: 3x3 Conv, MaxPooling
+        out = kl.Conv2D(
             filters=32,
             kernel_size=(3, 3),
-            padding="same",  # same takes ridiculously much longer than valid...
-            activation="relu",
-        )(backbone_output)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
+            padding='same',
+            activation='relu',
+            name="backbone_conv2"
+        )(out)
+        out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool2")(out)
 
-        backbone_output = kl.Conv2D(
+        # CONV3: 3x3 Conv, 3x3 Conv, MaxPooling
+        out = kl.Conv2D(
             filters=16,
             kernel_size=(3, 3),
-            padding="same",
-            activation="relu",
-        )(backbone_output)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
-
-        backbone_output = kl.Conv2D(
+            padding='same',
+            activation='relu',
+            name="backbone_conv3_1"
+        )(out)
+        out = kl.Conv2D(
             filters=16,
             kernel_size=(3, 3),
-            padding="same",
-            activation="relu",
-        )(backbone_output)
-        backbone_output = kl.MaxPooling2D(pool_size=(2, 2), padding='same')(backbone_output)
+            padding='same',
+            activation='relu',
+            name="backbone_conv3_2"
+        )(out)
+        out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool3")(out)
 
-        backbone_output = kl.Dropout(rate=0.25)(backbone_output)
+        # CONV4: 3x3 Conv, 3x3 Conv, MaxPooling
+        out = kl.Conv2D(
+            filters=16,
+            kernel_size=(3, 3),
+            padding='same',
+            activation='relu',
+            name="backbone_conv4_1"
+        )(out)
+        out = kl.Conv2D(
+            filters=16,
+            kernel_size=(3, 3),
+            padding='same',
+            activation='relu',
+            name="backbone_conv4_2"
+        )(out)
+        out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool4")(out)
+
+        # optional Dropout
+        # out = kl.Dropout(rate=0.25, name="backbone_dropout")(out)
 
         # backbone_model = km.Model(input=image_input, output=backbone_output)
-        return backbone_output
+        return out
 
     def fit_model(self,
                   inputs,

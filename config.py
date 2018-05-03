@@ -66,8 +66,18 @@ class Config(object):
     EPOCHS = 5
     VALIDATION_SPLIT = 0.1
 
+    ###################################
+    # DATA GENERATION SPECIFIC CONFIG #
+    ###################################
+    # Number of times an image is repeatedly read in for training,
+    # each time with a different collection of negative classified bounding boxes.
+    # All other negative ground-truth bounding boxes get marked as neutral
+    # thus not contributing to the rpn_cls_loss, in order to balance the amount
+    # of positive and negative samples for rpn_cls.
+    NUM_BALANCED_REPETITIONS = 1
+
     ####################
-    # FINE TUNE CONFIG #
+    # NETWORK CONFIG #
     ####################
     # Number of proposals to be processed for masks;
     # !! Should be higher than the the maximum number of objects with bounding boxes per image !!

@@ -492,7 +492,7 @@ def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
     #     mask = cv2.resize(mask, mask_resolution)
 
     # ensure integer coordinates
-    # see https://stackoverflow.com/questions/13225525/system-error-new-style-getargs-format-but-argument-is-not-a-tuple-when-using/43656642#43656642
+    # see https://stackoverflow.com/a/43656642
     (x1, y1), (x2, y2) = match[JSON_BOUNDING_BOX_KEY]
     bounding_box = ((int(x1), int(y1)), (int(x2), int(y2)))
 
@@ -790,11 +790,11 @@ if __name__ == "__main__":
     #     img = draw_bounding_boxes(img, matches)
     #     write_image("test"+i+".png", img)
 
-# image sources:
-# <a href='https://www.freepik.com/free-vector/wrinkled-paper-texture_851248.htm'>Designed by Freepik</a>
-# <a href='https://www.freepik.com/free-vector/realistic-paper-grain-texture_923291.htm'>Designed by Freepik</a>
-# <a href='https://www.freepik.com/free-photo/white-crumpled-paper-texture-for-background_1189772.htm'>Designed by Freepik</a>
-# <a href='https://www.freepik.com/free-photo/dirty-pattern-paint-room-block_1088379.htm'>Designed by Freepik</a>
-# <a href='https://www.freepik.com/free-vector/gradient-abstract-texture-background_1359668.htm'>Designed by Freepik</a>
-# <a href="https://www.freepik.com/free-photo/white-crumpled-paper-texture-for-background_1189772.htm">Designed by Freepik</a>
-# <a href="https://www.freepik.com/free-vector/realistic-coffee-cup-stain-collection_1577305.htm">Designed by Freepik</a>
+# freepik image sources:
+# https://www.freepik.com/free-vector/wrinkled-paper-texture_851248.htm
+# https://www.freepik.com/free-vector/realistic-paper-grain-texture_923291.htm
+# https://www.freepik.com/free-photo/white-crumpled-paper-texture-for-background_1189772.htm
+# https://www.freepik.com/free-photo/dirty-pattern-paint-room-block_1088379.htm
+# https://www.freepik.com/free-vector/gradient-abstract-texture-background_1359668.htm
+# https://www.freepik.com/free-photo/white-crumpled-paper-texture-for-background_1189772.htm
+# https://www.freepik.com/free-vector/realistic-coffee-cup-stain-collection_1577305.htm

@@ -7,6 +7,7 @@ import cv2
 import os
 from config import Config
 import numpy as np
+from tqdm import tqdm
 
 
 # check image formats
@@ -57,7 +58,7 @@ def inspect_center_points(pt_width=None):
     center_points = list(map(lambda p: (int(round(p[0] * img_width)),
                                         int(round(p[1] * img_height))),
                              center_points))
-    for pt in center_points:
+    for pt in tqdm(center_points, "Adding center points"):
         x, y = pt
         image[y - pt_width:y + pt_width, x - pt_width:x + pt_width, :] = 255
     cv2.imwrite("test.png", image)
@@ -82,7 +83,7 @@ def inspect_anchors():
     # test dir
     if not os.path.isdir("temp"):
         os.mkdir("temp")
-    for i in range(0, len(anchors)):
+    for i in tqdm(range(0, len(anchors)), "Writing anchors"):
         image = np.zeros(shape=(img_height, img_width, img_channels))
         a = anchors[i]
         cv2.rectangle(image, a[0], a[1], color=(255, 0, 0))
