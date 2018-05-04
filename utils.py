@@ -224,7 +224,6 @@ def boxes_normalized_to_raw(boxes, image_width, image_height):
     ))
 
 
-# TODO: Debug
 def randomly_balance_pos_neg_samples(cls, border_crossing_anchor_indices, balance_factor):
     """Balance the number of positive and negative objectness class samples
     by randomly setting enough negative samples to neutral.
@@ -334,8 +333,7 @@ def data_from_folder(config):
             rpn_reg_gt.append(reg)
             rpn_reg_deltas_gt.append(reg_deltas)
 
-    # Normalize data
-    train_images = train_images
+    train_images = np.array(train_images)
     rpn_cls_gt = np.array(rpn_cls_gt)
     rpn_cls_gt_training = np.array(rpn_cls_gt_training)
     rpn_reg_gt = np.array(rpn_reg_gt)
@@ -422,6 +420,7 @@ def write_solutions(config,
                     overwrite=True):
     """Writes out given boxes and other information for input_images to files.
 
+    :param Config config: config containing data for image desimplifying; see desimplify_image()
     :param np.array input_images: [batch_size, height, width, channels]
         array of input images
     :param np.array bounding_boxes: [batch_size, num_anchors, 4: (x1,y1,x2,y2) normalized coord]
@@ -444,6 +443,7 @@ def write_solutions(config,
     :param str output_filepath_format: format string that accepts the image index
         and filename to which the image is written; all folders have to exist
     :param boolean verbose: whether to print information on drawn boxes
+    :param boolean overwrite: wheter to overwrite logfile
     """
     col_pred_boxes = (0, 0, 255)  # red
     col_best_anchors = (100, 100, 0)  # dark green

@@ -40,18 +40,9 @@ if __name__ == "__main__":
         
         with Adadelta optimizer:
         --> 105s/48k samples,
-            
     """
-    # TRAINING MODEL
-    # TODO: Better anchors!
-    # TODO: Remove cross boundary anchors from training! Simply set their cls value to 0. (debug!)
-    # TODO: Increase max number of negative samples slightly (s.t. neg:pos > 1) (debug!)
-    # TODO: New data with more letters, fewer sizes, less overlap, easier textures/no stains (inspect!)
-    # TODO: Black and white!
-    # TODO: Change activation of rpn_cls back? (leave relu)
-    # TODO: More/less conv layers in the backbone? (leave more)
-    # TODO: Loss weights? (leave equal)
-
+    # TODO: Try Adadelta optimizer
+    # Script setup:
     pretraining = False
     training = True
     testing = True

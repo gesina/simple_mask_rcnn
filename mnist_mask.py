@@ -13,7 +13,7 @@ from tqdm import tqdm
 # img[h:w]
 
 # CROP and MASK GENERATION
-# TODO: Document variables
+# TODO: Document variables/ GenerationConfig class
 THRESHOLD = 100
 BOUNDING_BOX_COLOR = (0, 255, 0)
 MAX_BOUNDING_BOX_COLOR = (0, 0, 255)
@@ -537,7 +537,6 @@ def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
 # -----------------------------
 # Image generation
 # -----------------------------
-# TODO: GenerationConfig class
 def generate_random_image(
         min_letters=MIN_NUM_LETTERS, max_letters=MAX_NUM_LETTERS,
         min_lettersize=MIN_LETTERSIZE, max_lettersize=MAX_LETTERSIZE,

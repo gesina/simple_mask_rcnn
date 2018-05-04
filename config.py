@@ -40,7 +40,6 @@ def get_center_points(center_point_width, center_point_height, col_wise=False):
     return np.concatenate(center_pts, axis=0)
 
 
-# TODO: Return indices of boundary anchors
 def get_anchor_boxes(center_points, anchor_shapes):
     """
     Mind, that the order has to be compatible with the one induced by reshaping
@@ -75,7 +74,7 @@ class Config(object):
     ###################
     # TRAINING CONFIG #
     ###################
-    BATCH_SIZE = 64
+    BATCH_SIZE = 32  # 64 gets quite slow
     EPOCHS = 20
     BACKBONE_PRETRAINING_BATCH_SIZE = 128
     BACKBONE_PRETRAINING_EPOCHS = 15
