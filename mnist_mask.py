@@ -13,21 +13,27 @@ from tqdm import tqdm
 # img[h:w]
 
 # CROP and MASK GENERATION
+# TODO: Document variables
 THRESHOLD = 100
 BOUNDING_BOX_COLOR = (0, 255, 0)
 MAX_BOUNDING_BOX_COLOR = (0, 0, 255)
-MNIST_PNG_FOLDER = "data/mnist_png"
+MNIST_PNG_ROOT = "data/mnist_png"
 MNIST_CROP_ROOT = "data/mnist_crop"
 MNIST_MASK_ROOT = "data/mnist_mask"
-MIN_LETTERSIZE = 28
-MAX_LETTERSIZE = 60
+MIN_NUM_LETTERS = 0
+MAX_NUM_LETTERS = 16
+MIN_LETTERSIZE = 20
+MAX_LETTERSIZE = 45
+# How much the maximum letter size decreases per number of letters per image
+MAX_LETTERSIZE_DECREASE_FACTOR = 0.2
+MAX_OVERLAP = 0
 LETTER_RESOLUTION = (28, 28)
 IMAGE_RESOLUTION = (256, 256)  # width, height
 
 # IMAGE GENERATION
 TEXTURES_FOLDER = "data/textures"
-GRIDS_FOLDER = "data/grids"
-STAINS_FOLDER = "data/stains"
+GRIDS_FOLDER = None  # "data/grids"
+STAINS_FOLDER = None  # "data/stains"
 
 
 def valid_colors(max_brightness):
@@ -37,7 +43,9 @@ def valid_colors(max_brightness):
                   if r + g + b < max_brightness))
 
 
-MAX_BRIGHTNESS = 200
+MAX_BRIGHTNESS = 0  # 200
+MAX_ALPHA = 0.  # 0.2
+MAX_HEIGHT_VARIANCE = 0.1
 VALID_COLORS = {
     MAX_BRIGHTNESS: valid_colors(MAX_BRIGHTNESS)
 }
@@ -58,7 +66,7 @@ DATA_IMAGEROOT = "data/mask_rcnn/images"
 # HELPER FUNCTIONS
 # --------------------
 
-def otherroot(imagefileroot, new_mnist_root, image_mnist_root=MNIST_PNG_FOLDER):
+def otherroot(imagefileroot, new_mnist_root, image_mnist_root=MNIST_PNG_ROOT):
     """Returns (and creates) path with exchanged root folder for given image file."""
     newimagefileroot = imagefileroot.replace(image_mnist_root, new_mnist_root, 1)
     if not os.path.isdir(newimagefileroot):
@@ -137,6 +145,16 @@ def invert(image):
     return cv2.bitwise_not(image)
 
 
+def to_grayscale(image):
+    """Invert BGR image to grayscale."""
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+
+def to_bgr_colorspace(image):
+    """Invert BGR image to grayscale."""
+    return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+
 def mask_by_threshold(image, thresh=THRESHOLD, inverted=True):
     """Obtain mask from image by grayscaling and thresholding.
    :param image: cv2 image to threshold
@@ -145,7 +163,7 @@ def mask_by_threshold(image, thresh=THRESHOLD, inverted=True):
     if not inverted:
         image = invert(image)
     # change to grayscale colorspace
-    image_grayscale = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    image_grayscale = to_grayscale(image)
     return_code, image_thresholded = cv2.threshold(
         src=image_grayscale,
         thresh=thresh,
@@ -233,7 +251,7 @@ def generate_crop_and_mask_files(imagefile, maskoutfile, cropoutfile):
     write_image(cropoutfile, crop)
 
 
-def crop_and_mask_mnist(mnist_src_root=MNIST_PNG_FOLDER,
+def crop_and_mask_mnist(mnist_src_root=MNIST_PNG_ROOT,
                         mnist_mask_root=MNIST_MASK_ROOT,
                         mnist_crop_root=MNIST_CROP_ROOT):
     """Mask and crop all images in mnist_src_root and save to
@@ -258,7 +276,11 @@ def crop_and_mask_mnist(mnist_src_root=MNIST_PNG_FOLDER,
             )
 
 
-def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLUTION, resizefunc=simple_resize):
+def load_labeled_data_from_folder(foldername,
+                                  folderroot,
+                                  imagedim=LETTER_RESOLUTION,
+                                  resizefunc=simple_resize,
+                                  convert_to_gray=True):
     """Produce lists of (imgs, labels, masks), all images as np.array, from folder hierarchy.
 
     Needs a folder hierarchy of
@@ -287,25 +309,29 @@ def load_labeled_data_from_folder(foldername, folderroot, imagedim=LETTER_RESOLU
             imagefile = os.path.join(path, file)
             image = load_image(imagefile)
             image = resizefunc(image, imagedim)
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # 1 channel
+            if convert_to_gray:
+                image = to_grayscale(image)  # 1 channel
 
             # mask
-            maskfileroot = otherroot(path, new_mnist_root=MNIST_MASK_ROOT, image_mnist_root=MNIST_CROP_ROOT)
+            maskfileroot = otherroot(path, new_mnist_root=MNIST_MASK_ROOT, image_mnist_root=folderroot)
             maskfile = os.path.join(maskfileroot, file)
             mask = load_image(maskfile)
             mask = resizefunc(mask, imagedim)
+            if convert_to_gray:
+                mask = to_grayscale(mask)
 
             labeled_data.append((image, label, mask))
     x, label, masks = tuple(zip(*labeled_data))
     return np.array(x), np.array(label), np.array(masks)
 
 
-def load_data(
-        mnist_crop_root=MNIST_CROP_ROOT,
-        mnist_mask_root=MNIST_MASK_ROOT,
-        test_folder="testing",
-        train_folder="training",
-        do_resize=True):
+def load_data(mnist_crop_root=MNIST_CROP_ROOT,
+              mnist_mask_root=MNIST_MASK_ROOT,
+              test_folder="testing",
+              train_folder="training",
+              imagedim=LETTER_RESOLUTION,
+              do_convert_to_gray=True,
+              do_resize=True):
     """Load MNIST training and test data as (cropped img, mask, label).
 
    Needsdirectory structure
@@ -337,8 +363,13 @@ def load_data(
     further_args = {}
     if not do_resize:
         further_args = {"resizefunc": lambda x: x}
-    test = load_labeled_data_from_folder(test_folder, mnist_crop_root, **further_args)
-    train = load_labeled_data_from_folder(train_folder, mnist_crop_root, **further_args)
+    test = load_labeled_data_from_folder(test_folder, mnist_crop_root,
+                                         convert_to_gray=do_convert_to_gray,
+                                         imagedim=imagedim,
+                                         **further_args)
+    train = load_labeled_data_from_folder(train_folder, mnist_crop_root,
+                                          imagedim=imagedim,
+                                          convert_to_gray=do_convert_to_gray, **further_args)
     return train, test
 
 
@@ -506,14 +537,15 @@ def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
 # -----------------------------
 # Image generation
 # -----------------------------
+# TODO: GenerationConfig class
 def generate_random_image(
-        min_letters=0, max_letters=8,
+        min_letters=MIN_NUM_LETTERS, max_letters=MAX_NUM_LETTERS,
         min_lettersize=MIN_LETTERSIZE, max_lettersize=MAX_LETTERSIZE,
-        max_overlap=5,
-        max_height_variance=0.2,
+        max_overlap=MAX_OVERLAP,
+        max_height_variance=MAX_HEIGHT_VARIANCE,
         image_width=IMAGE_RESOLUTION[0], image_height=IMAGE_RESOLUTION[1],
         max_brightness=MAX_BRIGHTNESS,
-        max_alpha=0.2,
+        max_alpha=MAX_ALPHA,
         debug=False
 ):
     """
@@ -521,12 +553,15 @@ def generate_random_image(
     :param int max_letters: maximum number of letters per image
     :param int min_lettersize: minimum size of a letter box in px
     :param int max_lettersize: maximum size of a letter box in px
-    :param float max_height_variance:  in [0,1]; max percentage one letter may differ from the average size
+    :param float max_height_variance:  in [0,1]; max percentage one letter may differ from the average size;
+    without effect if set to 0
     :param int image_width: width of the image to generate
     :param int image_height: height of the image to generate
-    :param int max_overlap: maximum number of pixels letter boxes may overlap
-    :param int max_brightness: in [0, 3*255]; maximum brightness of all letter channels together; see random_color()
-    :param max_alpha: maximum
+    :param int max_overlap: (positive) maximum number of pixels letter boxes may overlap
+    :param int max_brightness: in [0, 3*255]; maximum brightness of all letter channels together;
+    see random_color(); without effect if set to 0
+    :param max_alpha: the letters will be added to the image with a random weight in
+    [1-max_alpha, 1]; without effect if set to 0 (then the weights are simply 1:1)
     :param boolean debug: if set, prints (more) debugging messages,
         and draws the masks and labels into the output image
     :return: tuple (np.array image, list matches) where
@@ -542,19 +577,25 @@ def generate_random_image(
 
     matches = []
 
+    # Start with empty white image
+    image = np.zeros(shape=(image_height, image_width, 3), dtype=np.uint8) + 255
+
     # TEXTURE
-    texturefile = random_file(TEXTURES_FOLDER)
-    # In case of Errors of the form "Premature end of JPEG file",
-    # ensure the images have been downloaded properly (and no .crdownload-files are processed)
-    texture = load_image(os.path.join(TEXTURES_FOLDER, texturefile))
-    # (randomly) extract window for image
-    image = random_window(texture, image_width, image_height)
+    if TEXTURES_FOLDER is not None:
+        texturefile = random_file(TEXTURES_FOLDER)
+        # In case of Errors of the form "Premature end of JPEG file",
+        # ensure the images have been downloaded properly (and no .crdownload-files are processed)
+        texture = load_image(os.path.join(TEXTURES_FOLDER, texturefile))
+        # (randomly) extract window for image
+        image = random_window(texture, image_width, image_height)
 
     # GRID
-    image = apply_layer_from_random_file(image, layerroot=GRIDS_FOLDER)
+    if GRIDS_FOLDER is not None:
+        image = apply_layer_from_random_file(image, layerroot=GRIDS_FOLDER)
 
     # (STAINS)
-    image = apply_layer_from_random_file(image, layerroot=STAINS_FOLDER)
+    if STAINS_FOLDER is not None:
+        image = apply_layer_from_random_file(image, layerroot=STAINS_FOLDER)
 
     # LETTERS
     num_letters = random.randint(min_letters, max_letters)
@@ -563,12 +604,16 @@ def generate_random_image(
 
     letterfiles = list(map(lambda r: random_letter(),
                            range(0, num_letters)))
-    # common parameters
+    # COMMON PARAMETERS
+    # Average height; maximum depending on number of letters
+    max_lettersize = min(max_lettersize - int(round(MAX_LETTERSIZE_DECREASE_FACTOR * num_letters)),
+                         min_lettersize + 1)
     avg_height = random.randint(min_lettersize, max_lettersize)
-    alpha = random.random() * max_alpha + (1 - max_alpha)  # weight for mixing in the letter
+    # weight for mixing in the letter
+    letter_weight = 1 if max_alpha == 0 else random.random() * max_alpha + (1 - max_alpha)
     if debug:
         print("Average height:\t", avg_height)
-        print("Alpha factor:\t", alpha)
+        print("Alpha factor:\t", letter_weight)
 
     # loop over chosen letters
     occupied_boxes = []
@@ -579,10 +624,7 @@ def generate_random_image(
                                               fixed_scaling_factor=scale)
 
         # COLOR: apply random color factors to letter channels
-        channel_factors = tuple(map(lambda col: (255 - col) / 255,
-                                    random_color(max_brightness)))
-        for i in range(0, letter.shape[2]):
-            letter[:, :, i] = np.multiply(letter[:, :, 0], channel_factors[i])
+        letter = randomly_color_inverted_image(letter, max_brightness)
 
         # coordinates
         w, h = letter.shape[1], letter.shape[0]
@@ -593,7 +635,7 @@ def generate_random_image(
         x, y = pt
 
         # apply letter to image
-        image[y:y + h, x:x + w] = cv2.addWeighted(image[y:y + h, x:x + w], 1, letter, -alpha, 0)
+        image[y:y + h, x:x + w] = cv2.addWeighted(image[y:y + h, x:x + w], 1, letter, -letter_weight, 0)
 
         # add letter mask, label, and coord. to matches
         occupied_boxes.append(((x + max_overlap, y + max_overlap), (w - 2 * max_overlap, h - 2 * max_overlap)))
@@ -608,6 +650,22 @@ def generate_random_image(
                                       map(lambda m: match_to_tuple(m), matches))
 
     return image, matches
+
+
+def randomly_color_inverted_image(image, max_brightness):
+    """Applies color of max_brightness to inverted, 3-channel grayscale image.
+
+    :param image: 3-channel grayscale image to apply color to
+    :param max_brightness: in [0, 3*255]; maximum sum of all channels of a pixel
+    in the non-inverted version of the output image
+    """
+    if max_brightness == 0:  # Nothing to do
+        return image
+    channel_factors = tuple(map(lambda col: (255 - col) / 255,
+                                random_color(max_brightness)))
+    for i in range(0, image.shape[2]):
+        image[:, :, i] = np.multiply(image[:, :, 0], channel_factors[i])
+    return image
 
 
 def generate_labeled_data_files(batch_size=50,
@@ -782,13 +840,15 @@ if __name__ == "__main__":
     # write_image("blub.png", img)
 
     # test generate_labeled_data()
-    generate_labeled_data_files(batch_size=50, num_batches=400)
-    # data = load_labeled_data()
-    # for i in range(0, len(data)):
-    #     img = data[0][i]
-    #     matches = data[1][i]
-    #     img = draw_bounding_boxes(img, matches)
-    #     write_image("test"+i+".png", img)
+    generate_labeled_data_files(batch_size=50, num_batches=110)
+#    generate_labeled_data_files(batch_size=50, num_batches=400)
+
+# data = load_labeled_data()
+# for i in range(0, len(data)):
+#     img = data[0][i]
+#     matches = data[1][i]
+#     img = draw_bounding_boxes(img, matches)
+#     write_image("test"+i+".png", img)
 
 # freepik image sources:
 # https://www.freepik.com/free-vector/wrinkled-paper-texture_851248.htm

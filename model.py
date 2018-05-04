@@ -3,11 +3,12 @@ import keras.models as km
 import keras.layers as kl
 import keras.engine as ke
 import keras.backend as kb
+import keras.callbacks as kc
 import tensorflow as tf
 import numpy as np
 
 
-def smooth_l1_loss(x_pred, x_true, normalization_factor):
+def smooth_l1_loss(x_pred, x_true, normalization_factor=None):
     """Gives the normalized, smooth L1 loss for lists of coordinates x and ground-truth coord x_gt.
     The smooth absolute value of a real number r is defined as
     `|r|_sl1 := (|r| > 1) ? |r|-0.5 : 0.5r**2` where |r| is the L1-norm (absolute value).
@@ -18,6 +19,7 @@ def smooth_l1_loss(x_pred, x_true, normalization_factor):
     :param np.array x_pred: [N, coord] predicted coordinates
     :param x_true: [N, coord] ground-truth coordinates
     :param float normalization_factor: factor to apply to sum of losses
+    instead of taking the mean
     :return: [1,] loss
     """
     diff = kb.abs(x_true - x_pred)
@@ -28,7 +30,11 @@ def smooth_l1_loss(x_pred, x_true, normalization_factor):
     loss = (less_than_one * 0.5 * diff ** 2) + (1 - less_than_one) * (diff - 0.5)
 
     # SUM and NORMALIZE BY normalizer
-    return tf.reduce_sum(loss) * normalization_factor
+    if normalization_factor is None:
+        loss = kb.switch(tf.size(loss) > 0, kb.mean(loss), tf.constant(0.0))
+    else:
+        loss = tf.reduce_sum(loss) * normalization_factor
+    return loss
 
 
 class MaskRCNNWrapper:
@@ -41,6 +47,10 @@ class MaskRCNNWrapper:
         self.loss_fn = smooth_l1_loss
         self.config = config
         self.training_mode = train
+        if train:
+            print("pretraining model ...")
+            self.backbone_pretraining_model = self.build_backbone_pretraining_model()
+        print("training model ...")
         self.model = self.build_mask_rcnn_model(train, **kwargs)
 
     def build_mask_rcnn_model(self, train=True, **kwargs):
@@ -101,6 +111,17 @@ class MaskRCNNWrapper:
                              outputs=[rpn_proposals, rpn_reg_deltas, rpn_cls],
                              **kwargs)
         return model
+
+    def build_backbone_pretraining_model(self):
+        input_image = kl.Input(shape=self.config.BACKBONE_TRAINING_IMAGE_SHAPE, name="backbone_training_input_image")
+        backbone_output = self.build_backbone_model(input_image)
+        output = kl.Dropout(rate=0.25)(backbone_output)
+        output = kl.Flatten()(output)
+        output = kl.Dense(units=64, activation="relu")(output)
+        output = kl.Dropout(rate=0.5)(output)
+        output = kl.Dense(units=self.config.NUM_BACKBONE_PRETRAINING_CLASSES, activation="softmax")(output)
+
+        return km.Model(inputs=[input_image], outputs=[output])
 
     # def apply_rpn_reg_deltas(self, rpn_reg_deltas, anchors):
     #     """Apply rpn_reg_deltas encoded as described below to the anchor boxes and get rpn_reg.
@@ -185,6 +206,12 @@ class MaskRCNNWrapper:
                     * self.config.LOSS_WEIGHTS[loss_layer_name])
             self.model.metrics_tensors.append(loss)
 
+    def compile_backbone_pretraining_model(self):
+        self.backbone_pretraining_model.compile(
+            loss=keras.losses.categorical_crossentropy,
+            optimizer=keras.optimizers.Adadelta(),
+            metrics=['accuracy'])
+
     def predict(self, input_images):
         assert not self.training_mode
         batch_size = input_images.shape[0]
@@ -267,7 +294,10 @@ class MaskRCNNWrapper:
         # rpn_reg_gt = MaskRCNNWrapper.batch_pack(rpn_reg_gt, batch_counts, self.config.BATCH_SIZE)
         rpn_reg_deltas_gt = tf.gather_nd(rpn_reg_deltas_gt, positive_indices)
 
-        return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
+        # Alternatively, if the number of sample boxes per batch varies much:
+        # Do not normalize by taking mean, but by factor 1/self.config.NUM_ANCHORS
+        # return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
+        return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt)
 
     # @staticmethod
     # def batch_pack(inputs, counts, num_rows):
@@ -334,8 +364,8 @@ class MaskRCNNWrapper:
             filters=anchors_per_location * 4,
             kernel_size=(1, 1),
             padding='same',
-            activation='linear',
-            name="rpn_bbox_pred"
+            activation='relu',
+            name="rpn_reg_pred"
         )(shared)
 
         # Resize: row-wise concat anchors to list
@@ -346,7 +376,8 @@ class MaskRCNNWrapper:
                     tf.shape(t)[0],
                     -1,
                     4)
-            )
+            ),
+            name="rpn_reg_resize"
         )(bbox_refinement_output)
 
         return rpn_reg
@@ -364,8 +395,8 @@ class MaskRCNNWrapper:
             filters=2 * anchors_per_location,
             kernel_size=(1, 1),
             padding='same',
-            activation='relu',
-            name="rpn_class_raw"
+            activation='linear',
+            name="rpn_cls_raw"
         )(model_input)
 
         # Resize: row-wise concat anchors to list
@@ -395,7 +426,7 @@ class MaskRCNNWrapper:
         inside the kernel window."""
         shared_output = kl.Conv2D(
             filters=32,
-            kernel_size=(5, 5),
+            kernel_size=(4, 4),
             padding='same',  # same takes ridiculously much longer than valid...
             activation='relu',
             name="rpn_conv_shared"
@@ -414,7 +445,7 @@ class MaskRCNNWrapper:
         # CONV1: 5x5 Conv, MaxPooling
         out = kl.Conv2D(
             filters=32,
-            kernel_size=(5, 5),
+            kernel_size=(3, 3),
             padding='same',  # same takes ridiculously much longer than valid...
             activation='relu',
             name="backbone_conv1"
@@ -432,13 +463,13 @@ class MaskRCNNWrapper:
         out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool2")(out)
 
         # CONV3: 3x3 Conv, 3x3 Conv, MaxPooling
-        out = kl.Conv2D(
-            filters=16,
-            kernel_size=(3, 3),
-            padding='same',
-            activation='relu',
-            name="backbone_conv3_1"
-        )(out)
+        # out = kl.Conv2D(
+        #     filters=16,
+        #     kernel_size=(3, 3),
+        #     padding='same',
+        #     activation='relu',
+        #     name="backbone_conv3_1"
+        # )(out)
         out = kl.Conv2D(
             filters=16,
             kernel_size=(3, 3),
@@ -449,13 +480,13 @@ class MaskRCNNWrapper:
         out = kl.MaxPooling2D(pool_size=(2, 2), padding='same', name="backbone_maxpool3")(out)
 
         # CONV4: 3x3 Conv, 3x3 Conv, MaxPooling
-        out = kl.Conv2D(
-            filters=16,
-            kernel_size=(3, 3),
-            padding='same',
-            activation='relu',
-            name="backbone_conv4_1"
-        )(out)
+        # out = kl.Conv2D(
+        #     filters=16,
+        #     kernel_size=(3, 3),
+        #     padding='same',
+        #     activation='relu',
+        #     name="backbone_conv4_1"
+        # )(out)
         out = kl.Conv2D(
             filters=16,
             kernel_size=(3, 3),
@@ -474,7 +505,8 @@ class MaskRCNNWrapper:
     def fit_model(self,
                   inputs,
                   outputs=None,
-                  validation_split=None):
+                  validation_split=None,
+                  checkpt_filepath_format=None):
         """Fit self.model.
 
         :param list inputs:
@@ -489,6 +521,8 @@ class MaskRCNNWrapper:
             rpn_reg_loss  # do not consider!
         ]
         :param float validation_split: percentage of the input to take for validation
+        :param str checkpt_filepath_format: format string for the path to the model weights checkpointing file;
+        accepts parameters like epoch, see keras documentation for checkpointing callback
         """
         if outputs is None:
             outputs = []
@@ -497,14 +531,40 @@ class MaskRCNNWrapper:
         num_samples = inputs[0].shape[0]
         anchors = self.get_anchors(batch_size=num_samples)
         inputs.append(anchors)
+
+        # Stop before overfitting and checkpoint every epoch
+        callbacks = [kc.EarlyStopping(monitor='val_loss', min_delta=0.001, patience=1)]
+        if checkpt_filepath_format is not None:
+            callbacks.append(
+                kc.ModelCheckpoint(checkpt_filepath_format, monitor='val_loss', save_weights_only=True, period=1)
+            )
         self.model.fit(
             x=inputs,
             y=outputs,
             batch_size=self.config.BATCH_SIZE,
             epochs=self.config.EPOCHS,
             verbose=1,
-            validation_split=validation_split
+            validation_split=validation_split,
+            callbacks=callbacks
         )
+
+    def fit_backbone_training_model(self, inputs, labels, validation_data=None, validation_split=None):
+        kwargs = {}
+        if validation_data is None:
+            kwargs["validation_split"] = validation_split or self.config.VALIDATION_SPLIT
+        else:
+            kwargs["validation_data"] = validation_data
+        callbacks = [
+            kc.EarlyStopping(monitor='val_acc', min_delta=0.015, patience=1),
+            kc.EarlyStopping(monitor='val_loss', min_delta=0.001, patience=1)
+            ]
+        self.backbone_pretraining_model.fit(
+            x=inputs, y=labels,
+            batch_size=self.config.BACKBONE_PRETRAINING_BATCH_SIZE,
+            epochs=self.config.BACKBONE_PRETRAINING_EPOCHS,
+            verbose=1,
+            callbacks=callbacks,
+            **kwargs)
 
 
 class ProposalLayer(ke.Layer):

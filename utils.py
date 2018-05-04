@@ -1,3 +1,4 @@
+import keras
 import numpy as np
 import mnist_mask as mm
 import config as conf
@@ -136,7 +137,7 @@ def to_rpn_gt(boxes, anchors,
     num_boxes = boxes.shape[0]
 
     # see config.RPN_???_SHAPE
-    cls_gt = np.zeros(shape=[num_anchors, 1])
+    cls_gt = np.zeros(shape=[num_anchors])
     reg_gt = np.zeros(shape=[num_anchors, 4])
     reg_deltas_gt = np.zeros(shape=[num_anchors, 4])
 
@@ -146,33 +147,43 @@ def to_rpn_gt(boxes, anchors,
         for j in range(0, num_anchors):
             ious[i, j] = iou(boxes[i], anchors[j])
 
-    # Each anchor:
+    # Each box:
+    #  best (unset) IoU anchor 1 (yes for this box)
+    # TODO: Better algorithm to get best available IoU anchor; this one implies shifts down and to the right
+    # best_anchor_map = {}
+    # for i in range(0, num_boxes):
+    #     best_anchor_idx = np.argmax(np.where(cls_gt != 1, ious[i, :], -1))
+    #     if best_anchor_idx not in best_anchor_map.keys():
+    #         best_anchor_map[best_anchor_idx] = [i]
+    #     else:
+    #         best_anchor_map[best_anchor_idx].append(i)
+    #
+    for i in range(num_boxes):
+        box_max_iou_idx = np.argmax(np.where(cls_gt != 1, ious[i, :], -1))
+        cls_gt[box_max_iou_idx] = 1
+        reg_gt[box_max_iou_idx, :] = boxes[i]
+        reg_deltas_gt[box_max_iou_idx, :] = box_to_delta(boxes[i], anchors[box_max_iou_idx])
+
+    # Each non-set anchor (maybe a box is approximated well by more than one anchor):
     #  best IoU >= min_iou_positive? -> 1 (yes for that box)
     #  best IoU <= max_iou_negative? -> -1 (no)
     #  else -> 0 (stay neutral)
     for j in range(0, num_anchors):
-        anchor_max_iou_idx = np.argmax(ious[:, j])
-        anchor_max_iou = ious[anchor_max_iou_idx, j]
-        if anchor_max_iou >= min_iou_positive:
-            cls_gt[j] = 1
-            reg_gt[j, :] = boxes[anchor_max_iou_idx]
-            reg_deltas_gt[j, :] = box_to_delta(boxes[anchor_max_iou_idx], anchors[j])
-        elif anchor_max_iou <= max_iou_negative:
-            cls_gt[j] = -1
-
-    # Each box:
-    #  no IoU better than min_iou_positive? -> best IoU anchor 1 (yes for this box)
-    for i in range(0, num_boxes):
-        box_max_iou_idx = np.argmax(ious[i, :])
-        if cls_gt[box_max_iou_idx] != 1:
-            cls_gt[box_max_iou_idx] = 1
-            reg_gt[box_max_iou_idx, :] = boxes[i]
-            reg_deltas_gt[box_max_iou_idx, :] = box_to_delta(boxes[i], anchors[box_max_iou_idx])
+        if cls_gt.flat[j] == 0:
+            anchor_max_iou_idx = np.argmax(ious[:, j])
+            anchor_max_iou = ious[anchor_max_iou_idx, j]
+            if anchor_max_iou >= min_iou_positive:
+                cls_gt[j] = 1
+                reg_gt[j, :] = boxes[anchor_max_iou_idx]
+                reg_deltas_gt[j, :] = box_to_delta(boxes[anchor_max_iou_idx], anchors[j])
+            elif anchor_max_iou <= max_iou_negative:
+                cls_gt[j] = -1
 
     # Did all boxes get at least one anchor?
-    assert len([i for i in range(0, num_boxes)
-                if boxes[i].tolist() not in reg_gt.tolist()]) == 0
-    return cls_gt, reg_gt, reg_deltas_gt
+    testl = [i for i in range(num_boxes)
+             if boxes[i].tolist() not in reg_gt.tolist()]
+    assert len(testl) == 0, "Some boxes did not get an anchor: " + str([(i, boxes[i]) for i in testl])
+    return cls_gt.reshape(num_anchors, 1), reg_gt, reg_deltas_gt
 
 
 def box_raw_to_normalized(box, image_width, image_height):
@@ -213,7 +224,8 @@ def boxes_normalized_to_raw(boxes, image_width, image_height):
     ))
 
 
-def randomly_balance_pos_neg_samples(cls):
+# TODO: Debug
+def randomly_balance_pos_neg_samples(cls, border_crossing_anchor_indices, balance_factor):
     """Balance the number of positive and negative objectness class samples
     by randomly setting enough negative samples to neutral.
 
@@ -222,14 +234,25 @@ def randomly_balance_pos_neg_samples(cls):
             * +1: positive
             * -1: negative
             * 0: neutral (does not contribute to training loss)
+    :param list border_crossing_anchor_indices: indices of the anchors that cross
+    a boundary and have to be blacklisted for training (by setting their cls
+    value to 0)
+    :param float balance_factor: Factor to get max_num_negative_samples from num_pos_samples;
+    the number of samples marked as negative is the chosen randomly between
+    num_pos_samples and balance_factor * num_pos_samples
     :return: cls with only an equal amount of positive and negative samples;
         the rest of the negative samples set to neutral (0)
     """
-    num_positive_samples = int(np.sum(cls == 1))
-    negative_indices = np.nonzero(cls == -1)[0].tolist()
-    max_num_negative_samples = min(num_positive_samples, len(negative_indices))
+    num_pos_samples = int(np.sum(cls == 1))
+    neg_indices = np.nonzero(cls == -1)[0].tolist()
 
-    rand_negative_indices = random.sample(negative_indices, max_num_negative_samples)
+    # Indices that may be marked as negative: gt negative boxes that do not cross a border
+    possible_neg_indices = [ind for ind in neg_indices
+                            if ind not in border_crossing_anchor_indices]
+    max_num_negative_samples = random.randint(num_pos_samples, int(round(num_pos_samples * balance_factor)))
+    max_num_negative_samples = min(max_num_negative_samples, len(possible_neg_indices))
+
+    rand_negative_indices = random.sample(possible_neg_indices, max_num_negative_samples)
 
     # Set all negative samples to neutral
     cls[cls == -1] = 0
@@ -237,6 +260,30 @@ def randomly_balance_pos_neg_samples(cls):
     cls[rand_negative_indices] = -1
 
     return cls
+
+
+def simplify_image(image, config):
+    if config.INVERTED_COLORS:
+        image = mm.invert(image)
+    if config.GRAYSCALE:
+        image = mm.to_grayscale(image)  # inverted grayscale is much easier to train
+        image = np.reshape(image, list(image.shape) + [1])
+    if config.NORMALIZE_IMAGE:
+        image = image.astype(np.float32) / 255
+    return image
+
+
+def desimplify_image(image, config):
+    """Inverse (as far as possible) to simplify_image()"""
+    if config.NORMALIZE_IMAGE:
+        image *= 255
+        image = image.astype(np.uint8)
+    if config.GRAYSCALE:
+        image = image.reshape(image.shape[:-1])
+        image = mm.to_bgr_colorspace(image)
+    if config.INVERTED_COLORS:
+        image = mm.invert(image)
+    return image
 
 
 def data_from_folder(config):
@@ -252,7 +299,7 @@ def data_from_folder(config):
     train_images, rpn_cls_gt, rpn_cls_gt_training, rpn_reg_gt, rpn_reg_deltas_gt = [], [], [], [], []
     # Iterate over images
     for i in tqdm(range(0, len(images)), "Parsing image files"):
-        image = images[i]
+        image = simplify_image(images[i], config=config)
         raw_matches = all_matches_raw[i]
         original_shape = original_shapes[i]
         image_width, image_height = original_shape[1], original_shape[0]
@@ -280,11 +327,15 @@ def data_from_folder(config):
         for rep in range(0, config.NUM_BALANCED_REPETITIONS):
             train_images.append(image)
             rpn_cls_gt.append(cls)
-            rpn_cls_gt_training.append(randomly_balance_pos_neg_samples(np.copy(cls)))
+            rpn_cls_gt_training.append(
+                randomly_balance_pos_neg_samples(np.copy(cls),
+                                                 border_crossing_anchor_indices=config.BOUNDARY_ANCHOR_INDICES,
+                                                 balance_factor=config.BALANCE_FACTOR))
             rpn_reg_gt.append(reg)
             rpn_reg_deltas_gt.append(reg_deltas)
 
-    train_images = np.array(train_images)
+    # Normalize data
+    train_images = train_images
     rpn_cls_gt = np.array(rpn_cls_gt)
     rpn_cls_gt_training = np.array(rpn_cls_gt_training)
     rpn_reg_gt = np.array(rpn_reg_gt)
@@ -341,11 +392,34 @@ def data_generator(config, do_check_data=False,
     return data_tuple
 
 
-def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
+def load_backbone_pretraining_data(config, letter_root=mm.MNIST_PNG_ROOT):
+    imagedim = config.BACKBONE_TRAINING_IMAGE_SHAPE[1], config.BACKBONE_TRAINING_IMAGE_SHAPE[0]
+    (x_train, y_train, mask_train), (x_test, y_test, mask_test) = \
+        mm.load_data(mnist_crop_root=letter_root, imagedim=imagedim, do_convert_to_gray=True)
+
+    # Normalize data
+    x_train = x_train.astype('float32') / 255
+    x_test = x_test.astype('float32') / 255
+
+    # Reshape data
+    x_train = x_train.reshape(x_train.shape[0], *config.BACKBONE_TRAINING_IMAGE_SHAPE)
+    x_test = x_test.reshape(x_test.shape[0], *config.BACKBONE_TRAINING_IMAGE_SHAPE)
+    print(x_train.shape, x_test.shape)
+
+    # Categorical data
+    y_train = keras.utils.to_categorical(y_train, config.NUM_BACKBONE_PRETRAINING_CLASSES)
+    y_test = keras.utils.to_categorical(y_test, config.NUM_BACKBONE_PRETRAINING_CLASSES)
+
+    return (x_train, y_train), (x_test, y_test)
+
+
+def write_solutions(config,
+                    input_images, bounding_boxes, image_shapes, gt_boxes=None,
                     gt_cls=None, anchors=None, reg_deltas=None,
                     cls=None, train_cls=None,
                     output_filepath_format=OUTPUT_FILEPATH_FORMAT,
-                    verbose=True):
+                    verbose=True,
+                    overwrite=True):
     """Writes out given boxes and other information for input_images to files.
 
     :param np.array input_images: [batch_size, height, width, channels]
@@ -385,8 +459,20 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
     print("Logging ground-truth classes to", LOGFILEPATH, ":", "yes" if gt_cls is not None else "no")
     print("Logging ground-truth training classes to", LOGFILEPATH, ":", "yes" if train_cls is not None else "no")
     print("Logging predicted classes to", LOGFILEPATH, ":", "yes" if cls is not None else "no")
+
+    # Check files
     if os.path.isfile(LOGFILEPATH):
-        raise FileExistsError("Logfile " + LOGFILEPATH + " exists!")
+        if overwrite:
+            print("Overwriting old log file", LOGFILEPATH, "...")
+            os.remove(LOGFILEPATH)
+        else:
+            raise FileExistsError("Logfile " + LOGFILEPATH + " exists!")
+    log_root = os.path.dirname(os.path.abspath(LOGFILEPATH))
+    if not os.path.isdir(log_root):
+        os.makedirs(log_root)
+    test_root = os.path.dirname(os.path.abspath(output_filepath_format))
+    if not os.path.isdir(test_root):
+        os.makedirs(test_root)
 
     image_idxs = range(0, input_images.shape[0])
     if not verbose:
@@ -395,7 +481,8 @@ def write_solutions(input_images, bounding_boxes, image_shapes, gt_boxes=None,
         # Image
         shape = image_shapes[img_idx]
         image_width, image_height = shape[1], shape[0]
-        img = mm.simple_resize(input_images[img_idx], (image_width, image_height))
+        img = desimplify_image(input_images[img_idx], config)
+        img = mm.simple_resize(img, (image_width, image_height))
 
         # Predicted bounding boxes
         curr_bounding_boxes = boxes_normalized_to_raw(
