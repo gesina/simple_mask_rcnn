@@ -48,9 +48,9 @@ class MaskRCNNWrapper:
         self.config = config
         self.training_mode = train
         if train:
-            print("pretraining model ...")
+            print("Building pretraining model ...")
             self.backbone_pretraining_model = self.build_backbone_pretraining_model()
-        print("training model ...")
+        print("Building training model ...")
         self.model = self.build_mask_rcnn_model(train, **kwargs)
 
     def build_mask_rcnn_model(self, train=True, **kwargs):
@@ -174,12 +174,13 @@ class MaskRCNNWrapper:
     def compile_model(self):
         assert self.training_mode, "Can only compile a training-mode model."
         # OPTIMIZER
-        optimizer = keras.optimizers.SGD(
-            lr=self.config.LEARNING_RATE,
-            momentum=self.config.LEARNING_MOMENTUM,
-            decay=self.config.WEIGHT_DECAY,
-            clipnorm=self.config.GRADIENT_CLIP_NORM
-        )
+        # optimizer = keras.optimizers.SGD(
+        #     lr=self.config.LEARNING_RATE,
+        #     momentum=self.config.LEARNING_MOMENTUM,
+        #     decay=self.config.WEIGHT_DECAY,
+        #     clipnorm=self.config.GRADIENT_CLIP_NORM
+        # )
+        optimizer = keras.optimizers.Adadelta()
 
         # LOSSES
         # Clear losses
@@ -296,25 +297,8 @@ class MaskRCNNWrapper:
 
         # Alternatively, if the number of sample boxes per batch varies much:
         # Do not normalize by taking mean, but by factor 1/self.config.NUM_ANCHORS
-        # return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
+        #return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt, normalization_factor=1/self.config.NUM_ANCHORS)
         return loss_fn(rpn_reg_deltas, rpn_reg_deltas_gt)
-
-    # @staticmethod
-    # def batch_pack(inputs, counts, num_rows):
-    #     """Flatten tensor along axis=0 (rows),
-    #     for each row picking only the first counts[row] columns.
-    #
-    #     :param nd.array inputs: [num_rows,] + inputs.shape[1:] tensor to be flattened and cropped
-    #     :param nd.array counts: [num_rows, 1: num cols for this row]
-    #     :param int num_rows: number of rows of inputs (should be inputs.shape[0])
-    #     :return: [sum(counts),] + inputs.shape[1:]
-    #     """
-    #     outputs = []
-    #     for i in range(0, num_rows):
-    #         # add list of first counts[i] columns of ith row
-    #         outputs.append(inputs[i, :counts[i]])
-    #     # concat all lists to one list of columns
-    #     return tf.concat(outputs, axis=0)
 
     def build_rpn_model(self, model_input, anchors_per_location):
         """Build the RPN model.
@@ -333,7 +317,7 @@ class MaskRCNNWrapper:
         :return: rpn_cls, rpn_reg
         """
         # SHARED MODEL for cls and reg
-        shared = MaskRCNNWrapper.build_rpn_shared_model(model_input)
+        shared = self.build_rpn_shared_model(model_input)
 
         # ANCHOR SCORES: cls model
         # Each anchor gets two filters, one for fg score, one for bg score
@@ -416,8 +400,7 @@ class MaskRCNNWrapper:
 
         return rpn_cls, rpn_cls_logits
 
-    @staticmethod
-    def build_rpn_shared_model(model_input):
+    def build_rpn_shared_model(self, model_input):
         """Output of shared ConvLayer for region proposal parts.
 
         This emulates the sliding window which is evaluated by the coordinate correction
@@ -426,8 +409,9 @@ class MaskRCNNWrapper:
         inside the kernel window."""
         shared_output = kl.Conv2D(
             filters=32,
-            kernel_size=(4, 4),
-            padding='same',  # same takes ridiculously much longer than valid...
+            kernel_size=self.config.SLIDING_WINDOW_SIZE,
+            # exclude sliding windows that would cross the image borders:
+            padding='valid',
             activation='relu',
             name="rpn_conv_shared"
         )(model_input)
@@ -533,7 +517,7 @@ class MaskRCNNWrapper:
         inputs.append(anchors)
 
         # Stop before overfitting and checkpoint every epoch
-        callbacks = [kc.EarlyStopping(monitor='val_loss', min_delta=0.001, patience=1)]
+        callbacks = [kc.EarlyStopping(monitor='val_loss', min_delta=0.0001, patience=1)]
         if checkpt_filepath_format is not None:
             callbacks.append(
                 kc.ModelCheckpoint(checkpt_filepath_format, monitor='val_loss', save_weights_only=True, period=1)
@@ -675,13 +659,16 @@ class ProposalLayer(ke.Layer):
 
         anchor_axis = 0
         num_anchors = tf.shape(datum)[0]
-        batch_fg_scores = datum[:, 1]
+        fg_scores = datum[:, 1]
         pre_nms_limit = tf.minimum(self.pre_nms_limit, num_anchors)
 
         # top k anchor indices
-        indices_to_keep = tf.nn.top_k(batch_fg_scores,
+        indices_to_keep = tf.nn.top_k(fg_scores,
                                       k=pre_nms_limit,
                                       sorted=True, name="top_anchors").indices
+        # drop very uncertain ones
+        indices_to_keep = tf.gather(indices_to_keep, tf.where(tf.gather(fg_scores, indices_to_keep) > 0.5)[:, 0])
+
         # trim the datum to the above top k anchors
         return tf.gather(datum,
                          indices=indices_to_keep,

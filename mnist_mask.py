@@ -21,11 +21,11 @@ MNIST_PNG_ROOT = "data/mnist_png"
 MNIST_CROP_ROOT = "data/mnist_crop"
 MNIST_MASK_ROOT = "data/mnist_mask"
 MIN_NUM_LETTERS = 0
-MAX_NUM_LETTERS = 16
-MIN_LETTERSIZE = 20
-MAX_LETTERSIZE = 45
+MAX_NUM_LETTERS = 10
+MIN_LETTERHEIGHT = 30
+MAX_LETTERHEIGHT = 45
 # How much the maximum letter size decreases per number of letters per image
-MAX_LETTERSIZE_DECREASE_FACTOR = 0.2
+MAX_LETTERSIZE_DECREASE_FACTOR = 1
 MAX_OVERLAP = 0
 LETTER_RESOLUTION = (28, 28)
 IMAGE_RESOLUTION = (256, 256)  # width, height
@@ -539,7 +539,7 @@ def match_to_tuple(match, mask_resolution=JSON_MASK_RESOLUTION):
 # -----------------------------
 def generate_random_image(
         min_letters=MIN_NUM_LETTERS, max_letters=MAX_NUM_LETTERS,
-        min_lettersize=MIN_LETTERSIZE, max_lettersize=MAX_LETTERSIZE,
+        min_lettersize=MIN_LETTERHEIGHT, max_lettersize=MAX_LETTERHEIGHT,
         max_overlap=MAX_OVERLAP,
         max_height_variance=MAX_HEIGHT_VARIANCE,
         image_width=IMAGE_RESOLUTION[0], image_height=IMAGE_RESOLUTION[1],
@@ -710,7 +710,7 @@ def generate_labeled_data_files(batch_size=50,
     if not os.path.isdir(annotationsroot):
         os.makedirs(annotationsroot)
 
-    for batch_id in tqdm(range(0, num_batches), "Image batches:"):
+    for batch_id in tqdm(range(0, num_batches), "Image batches"):
         annotations = []
         for img_id in tqdm(range(start_id_enumeration, start_id_enumeration + batch_size),
                            "Images for batch " + str(batch_id)):
@@ -780,7 +780,7 @@ def load_labeled_data(annotationsroot=DATA_ANNOTATIONSROOT,
 # INSPECTION TOOLS
 # -------------------
 
-def draw_bounding_boxes(image, boxes, color=BOUNDING_BOX_COLOR):
+def draw_bounding_boxes(image, boxes, color=BOUNDING_BOX_COLOR, thickness=1):
     """Return the image with bounding boxes.
 
     :param np.array image: image
@@ -792,7 +792,8 @@ def draw_bounding_boxes(image, boxes, color=BOUNDING_BOX_COLOR):
         cv2.rectangle(image,
                       box[0],  # (x1, y1)
                       box[1],  # (x2, y2)
-                      color)
+                      color,
+                      thickness=thickness)
     return image
 
 

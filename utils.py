@@ -7,6 +7,11 @@ from tqdm import tqdm
 from math import log, exp
 import random
 
+
+####################
+# Further Settings #
+####################
+
 MIN_IOU = 0.3
 
 NPY_FOLDER = "data/mask_rcnn/prepared_npy"
@@ -28,27 +33,9 @@ OUTPUT_FILEPATH_FORMAT = "data/mask_rcnn/test/test{}.jpg"
 LOGFILEPATH = "log"
 
 
-def iou(box1, box2):
-    """Intersection over Union value."""
-    # Intersection rectangle
-    intersect_x1 = max(box1[0], box2[0])
-    intersect_y1 = max(box1[1], box2[1])
-    intersect_x2 = min(box1[2], box2[2])
-    intersect_y2 = min(box1[3], box2[3])
-
-    # Area of intersection rectangle
-    if intersect_x1 >= intersect_x2 or intersect_y1 >= intersect_y2:
-        return 0.0
-    area_intersection = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1)
-
-    # Area of both boxes
-    area_box1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    area_box2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-
-    # Intersection over union ratio: intersection_area/union_area
-    area_union = float(area_box1 + area_box2 - area_intersection)
-    return area_intersection / area_union if area_union != 0 else 1
-
+#######################
+# Box Transformations #
+#######################
 
 def box_to_delta(box, anchor):
     """((x1,y1) = upper left corner, (x2, y2) = lower right corner):
@@ -115,77 +102,6 @@ def delta_to_box(delta, anchor):
     return x1, y1, x2, y2
 
 
-def to_rpn_gt(boxes, anchors,
-              max_iou_negative, min_iou_positive):
-    """
-
-    :param np.array boxes: [num_boxes, 4: (x1, y1, x2, y2)]
-        bounding box coordinates in normalized coordinates
-    :param np.array anchors: [num_boxes, 4: (x1, y1, x2, y2)]
-        anchor box coordinates (x1, y1, x2, y2) in normalized coordinates
-    :param float max_iou_negative: minimum intersection over union ratio of an anchor with an object
-        bounding box below which an anchor is considered not definitely not contain that object
-    :param float min_iou_positive: minimum intersection over union ratio of an anchor with an object
-        bounding box above which an anchor is considered not definitely contain that object
-    :return: cls_gt, reg_gt tensors as needed as rows for loss functions
-        - np.array cls_gt: [num_anchors, 1: class +1/-1/0] one row of rpn_cls_gt
-        - np.array reg_gt: [num_anchors, 4: box coord (x1, y1, x2, y2)] one row of rpn_reg_gt
-        - np.array reg_delta_gt: [num_anchors, 4: box deltas] where the box deltas are
-            encoded as described in box_to_delta()
-    """
-    num_anchors = anchors.shape[0]
-    num_boxes = boxes.shape[0]
-
-    # see config.RPN_???_SHAPE
-    cls_gt = np.zeros(shape=[num_anchors])
-    reg_gt = np.zeros(shape=[num_anchors, 4])
-    reg_deltas_gt = np.zeros(shape=[num_anchors, 4])
-
-    # calc IoUs for each box and anchor
-    ious = np.zeros(shape=[num_boxes, num_anchors])
-    for i in range(0, num_boxes):
-        for j in range(0, num_anchors):
-            ious[i, j] = iou(boxes[i], anchors[j])
-
-    # Each box:
-    #  best (unset) IoU anchor 1 (yes for this box)
-    # TODO: Better algorithm to get best available IoU anchor; this one implies shifts down and to the right
-    # best_anchor_map = {}
-    # for i in range(0, num_boxes):
-    #     best_anchor_idx = np.argmax(np.where(cls_gt != 1, ious[i, :], -1))
-    #     if best_anchor_idx not in best_anchor_map.keys():
-    #         best_anchor_map[best_anchor_idx] = [i]
-    #     else:
-    #         best_anchor_map[best_anchor_idx].append(i)
-    #
-    for i in range(num_boxes):
-        box_max_iou_idx = np.argmax(np.where(cls_gt != 1, ious[i, :], -1))
-        cls_gt[box_max_iou_idx] = 1
-        reg_gt[box_max_iou_idx, :] = boxes[i]
-        reg_deltas_gt[box_max_iou_idx, :] = box_to_delta(boxes[i], anchors[box_max_iou_idx])
-
-    # Each non-set anchor (maybe a box is approximated well by more than one anchor):
-    #  best IoU >= min_iou_positive? -> 1 (yes for that box)
-    #  best IoU <= max_iou_negative? -> -1 (no)
-    #  else -> 0 (stay neutral)
-    for j in range(0, num_anchors):
-        if cls_gt.flat[j] == 0:
-            anchor_max_iou_idx = np.argmax(ious[:, j])
-            anchor_max_iou = ious[anchor_max_iou_idx, j]
-            if anchor_max_iou >= min_iou_positive:
-                cls_gt[j] = 1
-                reg_gt[j, :] = boxes[anchor_max_iou_idx]
-                reg_deltas_gt[j, :] = box_to_delta(boxes[anchor_max_iou_idx], anchors[j])
-            elif anchor_max_iou <= max_iou_negative:
-                cls_gt[j] = -1
-
-    # Did all boxes get at least one anchor?
-    testl = [i for i in range(num_boxes)
-             if boxes[i].tolist() not in reg_gt.tolist()]
-    assert len(testl) == 0, "Some boxes did not get an anchor: " + str([(i, boxes[i]) for i in testl])
-    return cls_gt.reshape(num_anchors, 1), reg_gt, reg_deltas_gt
-
-
 def box_raw_to_normalized(box, image_width, image_height):
     """Reformat box from mm format to [x1, y1, x2, y2] in normalized coordinates.
 
@@ -222,6 +138,103 @@ def boxes_normalized_to_raw(boxes, image_width, image_height):
                               image_height=image_height),
         boxes
     ))
+
+
+#################################
+# Data Parsing Helper Functions #
+#################################
+
+def iou(box1, box2):
+    """Intersection over Union value."""
+    # Intersection rectangle
+    intersect_x1 = max(box1[0], box2[0])
+    intersect_y1 = max(box1[1], box2[1])
+    intersect_x2 = min(box1[2], box2[2])
+    intersect_y2 = min(box1[3], box2[3])
+
+    # Area of intersection rectangle
+    if intersect_x1 >= intersect_x2 or intersect_y1 >= intersect_y2:
+        return 0.0
+    area_intersection = (intersect_x2 - intersect_x1) * (intersect_y2 - intersect_y1)
+
+    # Area of both boxes
+    area_box1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area_box2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+
+    # Intersection over union ratio: intersection_area/union_area
+    area_union = float(area_box1 + area_box2 - area_intersection)
+    return area_intersection / area_union if area_union != 0 else 1
+
+
+def generate_gt_labels(boxes, anchors,
+                       max_iou_negative, min_iou_positive):
+    """
+
+    :param np.array boxes: [num_boxes, 4: (x1, y1, x2, y2)]
+        bounding box coordinates in normalized coordinates
+    :param np.array anchors: [num_boxes, 4: (x1, y1, x2, y2)]
+        anchor box coordinates (x1, y1, x2, y2) in normalized coordinates
+    :param float max_iou_negative: minimum intersection over union ratio of an anchor with an object
+        bounding box below which an anchor is considered not definitely not contain that object
+    :param float min_iou_positive: minimum intersection over union ratio of an anchor with an object
+        bounding box above which an anchor is considered not definitely contain that object
+    :return: cls_gt, reg_gt tensors as needed as rows for loss functions
+        - np.array cls_gt: [num_anchors, 1: class +1/-1/0] one row of rpn_cls_gt
+        - np.array reg_gt: [num_anchors, 4: box coord (x1, y1, x2, y2)] one row of rpn_reg_gt
+        - np.array reg_delta_gt: [num_anchors, 4: box deltas] where the box deltas are
+            encoded as described in box_to_delta()
+    """
+    num_anchors = anchors.shape[0]
+    num_boxes = boxes.shape[0]
+
+    # see config.RPN_???_SHAPE
+    cls_gt = np.zeros(shape=[num_anchors])
+    reg_gt = np.zeros(shape=[num_anchors, 4])
+    reg_deltas_gt = np.zeros(shape=[num_anchors, 4])
+
+    # calc IoUs for each box and anchor
+    ious = np.zeros(shape=[num_boxes, num_anchors])
+    for i in range(0, num_boxes):
+        for j in range(0, num_anchors):
+            ious[i, j] = iou(boxes[i], anchors[j])
+
+    # Each box:
+    #  best (unset) IoU anchor 1 (yes for this box)
+    # TODO: Better algorithm to get best available IoU anchor; this one implies shifts down and to the right
+    for i in range(num_boxes):
+        box_max_iou_idx = np.argmax(np.where(cls_gt != 1, ious[i, :], -1))
+        cls_gt[box_max_iou_idx] = 1
+        reg_gt[box_max_iou_idx, :] = boxes[i]
+        reg_deltas_gt[box_max_iou_idx, :] = box_to_delta(boxes[i], anchors[box_max_iou_idx])
+
+    # Each non-set anchor (maybe a box is approximated well by more than one anchor):
+    #  best IoU >= min_iou_positive? -> 1 (yes for that box)
+    #  best IoU <= max_iou_negative? -> -1 (no)
+    #  else -> 0 (stay neutral) with best bounding box
+    # The last (0s get bounding boxes) is a test, taking in neutral anchors for
+    # coordinate correction accuracy for misclassified anchor boxes.
+    for j in range(0, num_anchors):
+        if cls_gt.flat[j] == 0:
+            anchor_max_iou_idx = np.argmax(ious[:, j])
+            anchor_max_iou = ious[anchor_max_iou_idx, j]
+            if anchor_max_iou >= min_iou_positive:
+                cls_gt[j] = 1
+                reg_gt[j, :] = boxes[anchor_max_iou_idx]
+                reg_deltas_gt[j, :] = box_to_delta(boxes[anchor_max_iou_idx], anchors[j])
+            elif anchor_max_iou <= max_iou_negative:
+                cls_gt[j] = -1
+                # reg_gt[j, :] stays zero padding
+                # reg_deltas_gt[j, :] stays zero padding
+            else:
+                # cls_gt[j] stays 0
+                reg_gt[j, :] = boxes[anchor_max_iou_idx]
+                reg_deltas_gt[j, :] = box_to_delta(boxes[anchor_max_iou_idx], anchors[j])
+
+    # Did all boxes get at least one anchor?
+    testl = [i for i in range(num_boxes)
+             if boxes[i].tolist() not in reg_gt.tolist()]
+    assert len(testl) == 0, "Some boxes did not get an anchor: " + str([(i, boxes[i]) for i in testl])
+    return cls_gt.reshape(num_anchors, 1), reg_gt, reg_deltas_gt
 
 
 def randomly_balance_pos_neg_samples(cls, border_crossing_anchor_indices, balance_factor):
@@ -285,6 +298,31 @@ def desimplify_image(image, config):
     return image
 
 
+###########################
+# Data Loading/Generation #
+###########################
+
+def check_data(warning_message_format="WARNING: Data {} containing {} values!",
+               checks=None,
+               **data):
+    """Apply checks on data.
+
+    :param str warning_message_format: formatting string accepting datum-key and check-key.
+    :param dict checks: dict {check_name: check_function}; default: NaN check, +/-inf check
+    :param dict data: np.arrays to check entries of
+    :return: True if a warning was given, else False
+    """
+    if checks is None:
+        checks = {"NaN": np.isnan, "-inf": np.isneginf, "inf": np.isinf}
+    warned = False
+    for key, datum in data.items():
+        for check, fn in checks.items():
+            if fn(datum).any():
+                print(warning_message_format.format(key, check))
+                warned = True
+    return warned
+
+
 def data_from_folder(config):
     """Read and parse image data and metadata into Mask R-CNN model input.
 
@@ -319,9 +357,9 @@ def data_from_folder(config):
                              boxes))
             # Get objectness class and (for positive ones) ground-truth box coordinates
             # for each anchor in a list; this is one row of rpn_cls_gt, rpn_get_gt resp.
-            cls, reg, reg_deltas = to_rpn_gt(np.array(boxes), np.array(config.ANCHOR_BOXES),
-                                             max_iou_negative=config.MAX_IOU_NEGATIVE,
-                                             min_iou_positive=config.MIN_IOU_POSITIVE)
+            cls, reg, reg_deltas = generate_gt_labels(np.array(boxes), np.array(config.ANCHOR_BOXES),
+                                                      max_iou_negative=config.MAX_IOU_NEGATIVE,
+                                                      min_iou_positive=config.MIN_IOU_POSITIVE)
         # TODO: Find more efficient way to generate repetitions with different balances
         for rep in range(0, config.NUM_BALANCED_REPETITIONS):
             train_images.append(image)
@@ -343,39 +381,21 @@ def data_from_folder(config):
     return train_images, rpn_cls_gt, rpn_cls_gt_training, rpn_reg_gt, rpn_reg_deltas_gt, original_shapes
 
 
-def check_data(warning_message_format="WARNING: Data {} containing {} values!",
-               checks=None,
-               **data):
-    """Apply checks on data.
-
-    :param str warning_message_format: formatting string accepting datum-key and check-key.
-    :param dict checks: dict {check_name: check_function}; default: NaN check, +/-inf check
-    :param dict data: np.arrays to check entries of
-    :return: True if a warning was given, else False
-    """
-    if checks is None:
-        checks = {"NaN": np.isnan, "-inf": np.isneginf, "inf": np.isinf}
-    warned = False
-    for key, datum in data.items():
-        for check, fn in checks.items():
-            if fn(datum).any():
-                print(warning_message_format.format(key, check))
-                warned = True
-    return warned
-
-
-def data_generator(config, do_check_data=False,
-                   npy_filenames=NPY_FILENAMES):
+def load_maskrcnn_data(config,
+                       reload=False, save_new_as_npy=True,
+                       do_check_data=False,
+                       npy_filenames=NPY_FILENAMES):
     npy_filepaths = [os.path.join(NPY_FOLDER, fn) for fn in npy_filenames]
 
     # No .npy files yet?
     if not os.path.isdir(NPY_FOLDER):
         os.makedirs(NPY_FOLDER)
-    if any([not os.path.isfile(f) for f in npy_filepaths]):
+    if reload or any([not os.path.isfile(f) for f in npy_filepaths]):
         data_tuple = data_from_folder(config)
-        print("Saving parsed data ...")
-        for i in tqdm(range(0, len(data_tuple)), ".npy files written"):
-            data_tuple[i].dump(npy_filepaths[i])
+        if save_new_as_npy:
+            print("Saving parsed data ...")
+            for i in tqdm(range(0, len(data_tuple)), ".npy files written"):
+                data_tuple[i].dump(npy_filepaths[i])
         do_check_data = True  # check newly adquired data!
     else:
         print("Loading image data ...")
@@ -402,7 +422,6 @@ def load_backbone_pretraining_data(config, letter_root=mm.MNIST_PNG_ROOT):
     # Reshape data
     x_train = x_train.reshape(x_train.shape[0], *config.BACKBONE_TRAINING_IMAGE_SHAPE)
     x_test = x_test.reshape(x_test.shape[0], *config.BACKBONE_TRAINING_IMAGE_SHAPE)
-    print(x_train.shape, x_test.shape)
 
     # Categorical data
     y_train = keras.utils.to_categorical(y_train, config.NUM_BACKBONE_PRETRAINING_CLASSES)
@@ -410,6 +429,10 @@ def load_backbone_pretraining_data(config, letter_root=mm.MNIST_PNG_ROOT):
 
     return (x_train, y_train), (x_test, y_test)
 
+
+##########################
+# Data/Output Inspection #
+##########################
 
 def write_solutions(config,
                     input_images, bounding_boxes, image_shapes, gt_boxes=None,
@@ -447,6 +470,7 @@ def write_solutions(config,
     """
     col_pred_boxes = (0, 0, 255)  # red
     col_best_anchors = (100, 100, 0)  # dark green
+    thickness_best_anchors = 3
     col_pred_boxes_by_deltas = (0, 255, 0)  # green
     col_gt_boxes = (255, 0, 0)  # blue
 
@@ -460,10 +484,17 @@ def write_solutions(config,
     print("Logging ground-truth training classes to", LOGFILEPATH, ":", "yes" if train_cls is not None else "no")
     print("Logging predicted classes to", LOGFILEPATH, ":", "yes" if cls is not None else "no")
 
+    # Check input
+    assert not check_data(bounding_boxes), str(bounding_boxes) + "Bounding boxes incorrect"
+    assert not check_data(gt_boxes), str(gt_boxes) + "Gt_boxes incorrect"
+    assert not check_data(gt_cls), str(gt_cls) + "Gt_cls incorrect"
+    assert not check_data(anchors), str(anchors) + "Anchors incorrect"
+    assert not check_data(reg_deltas), str(reg_deltas) + "Reg_deltas incorrect"
+
     # Check files
     if os.path.isfile(LOGFILEPATH):
         if overwrite:
-            print("Overwriting old log file", LOGFILEPATH, "...")
+            print("Overwriting old log file", LOGFILEPATH, ": yes")
             os.remove(LOGFILEPATH)
         else:
             raise FileExistsError("Logfile " + LOGFILEPATH + " exists!")
@@ -484,15 +515,7 @@ def write_solutions(config,
         img = desimplify_image(input_images[img_idx], config)
         img = mm.simple_resize(img, (image_width, image_height))
 
-        # Predicted bounding boxes
-        curr_bounding_boxes = boxes_normalized_to_raw(
-            bounding_boxes[img_idx].tolist(),
-            image_width=image_width,
-            image_height=image_height
-        )
-        img = mm.draw_bounding_boxes(img, curr_bounding_boxes, color=col_pred_boxes)
-
-        # Predicted bounding boxes by box deltas
+        # Predicted bounding boxes of best anchors (by box deltas)
         if anchors is not None and gt_cls is not None and reg_deltas is not None:
             curr_bounding_boxes_by_deltas = [
                 box_normalized_to_raw(list(delta_to_box(reg_deltas[img_idx, i], anchors[i])),
@@ -500,7 +523,8 @@ def write_solutions(config,
                 for i in range(0, anchors.shape[0])
                 if gt_cls[img_idx, i] == 1
             ]
-            img = mm.draw_bounding_boxes(img, curr_bounding_boxes_by_deltas, color=col_pred_boxes_by_deltas)
+            img = mm.draw_bounding_boxes(img, curr_bounding_boxes_by_deltas, color=col_pred_boxes_by_deltas,
+                                         thickness=thickness_best_anchors)
 
         # Ground-truth bounding boxes
         if gt_boxes is not None:
@@ -534,6 +558,14 @@ def write_solutions(config,
                 print("Pos:", len([cls for cls in gt_cls[img_idx] if cls == 1]),
                       "Neg:", len([cls for cls in gt_cls[img_idx] if cls == -1]),
                       "Neutr:", len([cls for cls in gt_cls[img_idx] if cls == 0]))
+
+        # Predicted bounding boxes
+        curr_bounding_boxes = boxes_normalized_to_raw(
+            bounding_boxes[img_idx].tolist(),
+            image_width=image_width,
+            image_height=image_height
+        )
+        img = mm.draw_bounding_boxes(img, curr_bounding_boxes, color=col_pred_boxes)
 
         # Write to file
         filepath = output_filepath_format.format(img_idx)

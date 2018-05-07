@@ -95,7 +95,5 @@ if __name__ == "__main__":
     # full_check("data/textures", "data/grids", "data/stains")
     # full_check("data/mask_rcnn/images")
     # inspect_data(num_images=200)
-    inspect_center_points(pt_width=1)
+    inspect_center_points(pt_width=7)
     inspect_anchors()
-    config = Config()
-    print(config.NUM_ANCHORS)
