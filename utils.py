@@ -1,3 +1,22 @@
+"""
+Util functions for parsing and inspecting data.
+
+This module provides functions to prepare data as given by the
+data loading functions in the data generation module.
+
+Functionality
+
+* Parse data:
+  Parse the given masks, labels, and images as required by the
+  Mask R-CNN model and set by the config module.
+  Main Functions: load_backbone_pretraining_data(), load_maskrcnn_data()
+* Inspect data:
+  Visualize model output.
+  Main Functions: write_solutions()
+
+Some parts use configuration settings as given in the config module.
+"""
+
 import keras
 import numpy as np
 import mnist_mask as mm

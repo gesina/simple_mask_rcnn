@@ -11,8 +11,8 @@ Functionalities:
   Cropped versions and masked versions are then stored under the original
   name in different root directories using the same folder architecture,
   which at the same time represents the labels.
-  Main Function: crop_and_mask_mnist()
-* Load data like the mnist-module
+  Main Function: crop_and_mask_image_files()
+* Load data like the mnist-module:
   To work with the cropped image versions instead of the originals,
   there is a load_data() function analogues to the module keras.datasets.mnist.
   It also ensures the cropped versions are generated before loading.
@@ -195,7 +195,7 @@ def do_boxes_intersect(box, *other_boxes):
     return False
 
 
-def crop_and_mask(image, thresh, inverted):
+def crop_and_mask_image(image, thresh, inverted):
     """Crop image to largest bounding box.
 
     :param str image: cv2 image to get a cropped version from
@@ -227,21 +227,21 @@ def generate_crop_and_mask_files(imagefile, maskoutfile, cropoutfile, thresh, in
     """
     # load image (MNIST: letters white, background black)
     image = load_image(imagefile)
-    crop, mask = crop_and_mask(image, thresh=thresh, inverted=inverted)
+    crop, mask = crop_and_mask_image(image, thresh=thresh, inverted=inverted)
     # output
     write_image(maskoutfile, mask)
     write_image(cropoutfile, crop)
 
 
-def crop_and_mask_mnist(config):
+def crop_and_mask_image_files(config):
     """Mask and crop all images in config.MNIST_PNG_ROOT and save to
-   config.MNIST_MASK_ROOT, config.MNIST_CROP_ROOT.
+    config.MNIST_MASK_ROOT, config.MNIST_CROP_ROOT.
 
-   :param GenerationConfig config: configuration object with fields
+    :param GenerationConfig config: configuration object with fields
 
-   * MNIST_PNG_ROOT, MNIST_MASK_ROOT, MNIST_CROP_ROOT (root folders)
-   * THRESHOLD (threshold for obtaining mask)
-   """
+    * MNIST_PNG_ROOT, MNIST_MASK_ROOT, MNIST_CROP_ROOT (root folders)
+    * THRESHOLD (threshold for obtaining mask)
+    """
     for root, dirs, files in os.walk(config.MNIST_PNG_ROOT):
         # create folders
         print("Processing folder", root, "...")
@@ -344,7 +344,7 @@ def load_data(config=GenerationConfig(),
     # possible preparation
     if not os.path.isdir(config.MNIST_CROP_ROOT) or \
             not os.path.isdir(config.MNIST_MASK_ROOT):
-        crop_and_mask_mnist(config)
+        crop_and_mask_image_files(config)
 
     # iterate over labels
     further_args = {}
