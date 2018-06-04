@@ -1,4 +1,38 @@
 #! /bin/python3
+"""
+Generate and load simple, labeled image segmentation data
+based on MNIST(-like) single object images.
+
+Functionalities:
+
+* Crop and mask images:
+  Detect the single object in simple images (like MNIST letter files),
+  crop the images to a bounding box of this object, and produce a mask.
+  Cropped versions and masked versions are then stored under the original
+  name in different root directories using the same folder architecture,
+  which at the same time represents the labels.
+  Main Function: crop_and_mask_mnist()
+* Load data like the mnist-module
+  To work with the cropped image versions instead of the originals,
+  there is a load_data() function analogues to the module keras.datasets.mnist.
+  It also ensures the cropped versions are generated before loading.
+  Main Function: load_data()
+* Generate random images with labels:
+  There are tools to create batches of images, each containing a random amount
+  of the cropped objects from above, and a random amount of further layers (like stains)
+  taken from other sample images. For the numerous possible settings have a look at the
+  GenerationConfig class, which is used for settings.
+  The images and corresponding annotations are saved in batches, where the annotations
+  are in a COCO-like format.
+  Main Function: generate_labeled_data_files()
+* Load generated data:
+  Load the previously stored data into numpy arrays.
+  Main Function: load_labeled_data()
+
+All main functions accept a GenerationConfig configuration object for generation specific
+settings (like storage locations or randomization parameters).
+"""
+
 import os
 import random
 
