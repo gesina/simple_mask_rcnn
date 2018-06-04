@@ -411,6 +411,7 @@ def load_maskrcnn_data(config,
 
 
 def load_backbone_pretraining_data(config, gen_config=mm.GenerationConfig()):
+    gen_config.LETTER_RESOLUTION = config.BACKBONE_TRAINING_IMAGE_SHAPE[1], config.BACKBONE_TRAINING_IMAGE_SHAPE[0]
     (x_train, y_train, mask_train), (x_test, y_test, mask_test) = \
         mm.load_data(gen_config, do_convert_to_gray=True)
 

@@ -1,6 +1,179 @@
+import json
+
 import numpy as np
+import os
+from datetime import datetime
 
 
+#######################
+# COMMON FUNCTIONALITY
+#######################
+def timestamp():
+    """Get the current time as string fit for filenames."""
+    return datetime.now().strftime("%Y-%m-%d_%Hh%Mm%Ss")
+
+
+class DictlikeConfig:
+    """Base class for configurations that provide dict-like update(), __str__(), and JSON dump."""
+    CONFIG_STORE_FILEPATH_FORMAT = "config_{}.json"
+
+    def to_dict(self):
+        """Get all attributes as dictionary, e.g. for serialization."""
+        return {
+            attr: getattr(self, attr)
+            for attr in dir(self) if not callable(getattr(self, attr)) and not attr.startswith("__")
+        }
+
+    def update(self, other_dict):
+        """Add or update attributes as in a dictionary.
+
+        :param dict other_dict: dictionary of the form {attribute: (new) value}
+        :return: this updated object
+        """
+        for k, v in other_dict.items():
+            setattr(self, k, v)
+        return self
+
+    def to_json_file(self, filepath=None):
+        """Dump all attributes as json into filepath.
+
+        :param str filepath: path to file where to dump the json content into;
+        if None, self.CONFIG_STORE_FILEPATH is taken;
+        if this is also None, a warning is printed and no action taken.
+        """
+        if filepath is None:
+            filepath = self.CONFIG_STORE_FILEPATH_FORMAT.format(timestamp())
+        if filepath is not None:
+            with open(filepath, 'w+') as f:
+                print("Dumping generation config into file ", filepath)
+                json.dump(self.to_dict(), f)
+        else:
+            print("WARNING: GenerationConfig object not dumped, as no filepath was given.")
+
+    def __str__(self):
+        return '\n'.join([str(k) + "\t:\t" + str(v) for k, v in self.to_dict().items()])
+
+
+#########################
+# DATA GENERATION CONFIG
+#########################
+class GenerationConfig(DictlikeConfig):
+    """Configuration settings for image generation.
+
+    To alter defaults, create a subclass.
+    To alter specific settings of an instance, use the update method below.
+    """
+    # Print (more) debugging messages
+    DEBUG = False
+
+    # CROP and MASK GENERATION
+    MNIST_PNG_ROOT = "data/mnist_png"
+    MNIST_CROP_ROOT = "data/mnist_crop"
+    MNIST_MASK_ROOT = "data/mnist_mask"
+    TRAIN_FOLDER = "training"
+    TEST_FOLDER = "testing"
+
+    INVERTED = True
+    THRESHOLD = 100
+    BOUNDING_BOX_COLOR = (0, 255, 0)
+    MAX_BOUNDING_BOX_COLOR = (0, 0, 255)
+
+    MIN_NUM_LETTERS = 0  # Minimal number of letters per image
+    MAX_NUM_LETTERS = 10  # Maximum number of letters per image
+    MIN_LETTERHEIGHT = 30  # Minimum size of a letter box in px
+    MAX_LETTERHEIGHT = 45  # Maximum size of a letter box in px
+
+    # How much the maximum letter size decreases per number of letters per image
+    MAX_LETTERSIZE_DECREASE_FACTOR = 1
+    # (Positive) Maximum number of pixels up to which letter boxes may overlap
+    MAX_OVERLAP = 0
+    LETTER_RESOLUTION = (28, 28)
+    IMAGE_RESOLUTION = (256, 256)  # width, height
+
+    # JSON KEYS
+    JSON_MASK_KEY = "match"
+    JSON_MATCHES_KEY = "matches"
+    JSON_LABEL_KEY = "label"
+    JSON_BOUNDING_BOX_KEY = "bounding_box"
+    JSON_FILENAME_KEY = "filepath"
+
+    JSON_MASK_RESOLUTION = (14, 14)  # compare letter resolution
+    # Path to the root folder where the json files with annotations should be saved in
+    DATA_ANNOTATIONSROOT = "data/mask_rcnn/annotations"
+    # Path to the root folder where the image files should be saved in
+    DATA_IMAGEROOT = "data/mask_rcnn/images"
+    # Format string accepting the image ID for naming the image files;
+    # needs a proper file ending
+    IMAGE_FILENAME_FORMAT = "{}.jpg"
+    # Format string accepting the batch_id with proper ending
+    # for naming the annotation files
+    ANNOTATIONS_FILENAME_FORMAT = "annotations00{}.json"
+    # The path for a JSON-dump of an GenerationConfig object is
+    # DATA_ANNOTATIONSROOT/CONFIG_STORE_FILENAME resp. None in case the last one is None
+    CONFIG_STORE_FILENAME_FORMAT = "generation_config_{}.json"
+
+    # Number of batches to perform;
+    # In generate_labeled_data_files() each batch produces
+    # one annotation file under annotationsroot
+    NUM_BATCHES = 200
+    # Number of images that are created and annotated in one file per batch
+    BATCH_SIZE = 50
+    # The filenames of the images serve as id, and are
+    # enumerated sequentially starting at START_ID_ENUMERATION
+    # in each generation process
+    START_ID_ENUMERATION = 1
+
+    # IMAGE GENERATION
+    TEXTURES_FOLDER = None  # "data/textures"
+    GRIDS_FOLDER = None  # "data/grids"
+    STAINS_FOLDER = None  # "data/stains"
+
+    # Maximum brightness of all letter channels together in [0, 3*255];
+    # without effect if set to 0
+    MAX_BRIGHTNESS = 0  # 200
+    # The letters will be added to the image with a random weight in [1-max_alpha, 1];
+    # without effect if set to 0 (then the weights are simply 1:1)
+    MAX_ALPHA = 0.  # 0.2
+    MAX_HEIGHT_VARIANCE = 0.1
+
+    def __init__(self):
+        if self.CONFIG_STORE_FILENAME_FORMAT is not None:
+            self.CONFIG_STORE_FILEPATH_FORMAT = os.path.join(
+                self.DATA_ANNOTATIONSROOT, self.CONFIG_STORE_FILENAME_FORMAT)
+        else:
+            self.CONFIG_STORE_FILEPATH_FORMAT = None
+
+        # Make sure our default value is already calculated
+        GenerationConfig.valid_colors(self.MAX_BRIGHTNESS)
+
+    _VALID_COLORS_DICT = {}
+
+    @staticmethod
+    def valid_colors(max_brightness):
+        """Give a list of all valid colors of brightness at most max_brightness.
+
+        To save computation time, a once calculated list for a value of max_brightness
+        is saved into GenerationConfig._VALID_COLORS_DICT[max_brightness] and reused
+        from there if queried again.
+
+        :param int max_brightness: maximum value of the sum of all channels;
+        has to be in [0, 3*255]
+        :return: List of all valid RGB colors with the sum of their channels
+        being smaller than max_brightness
+        """
+        if max_brightness not in GenerationConfig._VALID_COLORS_DICT:
+            GenerationConfig._VALID_COLORS_DICT[max_brightness] = tuple(
+                ((r, g, b) for r in range(0, 255)
+                 for g in range(0, 255)
+                 for b in range(0, 255)
+                 if r + g + b < max_brightness)
+            )
+        return GenerationConfig._VALID_COLORS_DICT[max_brightness]
+
+
+#########################
+# LEARNING CONFIG
+#########################
 def to_norm_coordinates(x, y, total_width, total_height):
     """Reformat absolute coordinates of image of shape shape to normalized ones.
 
@@ -73,9 +246,9 @@ def get_anchor_boxes(center_points, anchor_shapes):
     return np.array(anchors), border_cross_anchor_indices
 
 
-# DEFAULTS
-class Config(object):
+class Config(DictlikeConfig):
     """Configuration parameters. To adapt, create sub-class and overwrite."""
+    CONFIG_STORE_FILEPATH = "config.json"
 
     ###################
     # TRAINING CONFIG #
@@ -111,7 +284,6 @@ class Config(object):
     # height, width have to be divisible by 2**3!
     IMAGE_SHAPE = [256, 256]
     # Same for the backbone pretraining input
-    # TODO: Merge with GenerationConfig field LETTER_RESOLUTION
     BACKBONE_TRAINING_IMAGE_SHAPE = [32, 32]
 
     # Maximum iou value of an anchor with an object's bounding box
