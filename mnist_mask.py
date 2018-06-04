@@ -710,7 +710,7 @@ def generate_labeled_data_files(config):
 # LOAD TOOLS
 # -----------
 
-def load_labeled_data(config, image_shape=None, mask_resolution=None):
+def load_labeled_data(config=GenerationConfig(), image_shape=None, mask_resolution=None):
     """Read in images and annotations as specified in annotationsfiles found in annotationsroot.
 
     :param GenerationConfig config: configuration object with fields
@@ -718,6 +718,8 @@ def load_labeled_data(config, image_shape=None, mask_resolution=None):
     * DATA_ANNOTATIONSROOT, DATA_IMAGEROOT, JSON_MASK_RESOLUTION
     * JSON_FILENAME_KEY, JSON_MATCHES_KEY
     * JSON_LABEL_KEY, JSON_BOUNDING_BOX_KEY, JSON_MASK_KEY
+
+    GenerationConfig provides sensible defaults (i.e. ones that were probably used during generation)
 
     :param image_shape: shape in list form [height, width, ...] to resize loaded images to
     :param tuple mask_resolution: resolution as (width, height) to which the masks are resized;
@@ -731,6 +733,7 @@ def load_labeled_data(config, image_shape=None, mask_resolution=None):
     # TODO: make a generator read in only batches of certain size
     data = []
     for root, dirs, annotationsfiles in os.walk(config.DATA_ANNOTATIONSROOT):
+        # TODO: Only take files as annotation files that match a given regex
         for annotationsfilename in tqdm(annotationsfiles, "Annontationfiles", leave=False):
             annotationsfile = os.path.join(root, annotationsfilename)
             with open(annotationsfile, 'r') as annotations_filehandle:

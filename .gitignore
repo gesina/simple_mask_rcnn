@@ -17,3 +17,4 @@ cnn_mnist.py
 **.jpg
 **.png
 **.h5
+**config*.json

@@ -63,6 +63,8 @@ class GenerationConfig(DictlikeConfig):
     To alter defaults, create a subclass.
     To alter specific settings of an instance, use the update method below.
     """
+    CONFIG_STORE_FILEPATH_FORMAT = "generation_config_{}.json"
+
     # Print (more) debugging messages
     DEBUG = False
 
@@ -108,9 +110,6 @@ class GenerationConfig(DictlikeConfig):
     # Format string accepting the batch_id with proper ending
     # for naming the annotation files
     ANNOTATIONS_FILENAME_FORMAT = "annotations00{}.json"
-    # The path for a JSON-dump of an GenerationConfig object is
-    # DATA_ANNOTATIONSROOT/CONFIG_STORE_FILENAME resp. None in case the last one is None
-    CONFIG_STORE_FILENAME_FORMAT = "generation_config_{}.json"
 
     # Number of batches to perform;
     # In generate_labeled_data_files() each batch produces
@@ -137,12 +136,6 @@ class GenerationConfig(DictlikeConfig):
     MAX_HEIGHT_VARIANCE = 0.1
 
     def __init__(self):
-        if self.CONFIG_STORE_FILENAME_FORMAT is not None:
-            self.CONFIG_STORE_FILEPATH_FORMAT = os.path.join(
-                self.DATA_ANNOTATIONSROOT, self.CONFIG_STORE_FILENAME_FORMAT)
-        else:
-            self.CONFIG_STORE_FILEPATH_FORMAT = None
-
         # Make sure our default value is already calculated
         GenerationConfig.valid_colors(self.MAX_BRIGHTNESS)
 
