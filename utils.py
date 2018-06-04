@@ -410,10 +410,9 @@ def load_maskrcnn_data(config,
     return data_tuple
 
 
-def load_backbone_pretraining_data(config, letter_root=mm.MNIST_PNG_ROOT):
-    imagedim = config.BACKBONE_TRAINING_IMAGE_SHAPE[1], config.BACKBONE_TRAINING_IMAGE_SHAPE[0]
+def load_backbone_pretraining_data(config, gen_config=mm.GenerationConfig()):
     (x_train, y_train, mask_train), (x_test, y_test, mask_test) = \
-        mm.load_data(mnist_crop_root=letter_root, imagedim=imagedim, do_convert_to_gray=True)
+        mm.load_data(gen_config, do_convert_to_gray=True)
 
     # Normalize data
     x_train = x_train.astype('float32') / 255

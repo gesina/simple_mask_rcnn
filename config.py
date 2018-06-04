@@ -111,6 +111,7 @@ class Config(object):
     # height, width have to be divisible by 2**3!
     IMAGE_SHAPE = [256, 256]
     # Same for the backbone pretraining input
+    # TODO: Merge with GenerationConfig field LETTER_RESOLUTION
     BACKBONE_TRAINING_IMAGE_SHAPE = [32, 32]
 
     # Maximum iou value of an anchor with an object's bounding box
